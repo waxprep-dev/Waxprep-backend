@@ -383,7 +383,7 @@ async def award_badge(student_id: str, badge_code: str):
         .eq('student_id', student_id)\
         .eq('badge_id', badge['id'])\
         .execute()
-      if existing.data:
+    if existing.data:
         return  # Already has this badge
     
     # Award the badge
