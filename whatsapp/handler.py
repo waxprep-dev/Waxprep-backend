@@ -398,5 +398,217 @@ async def award_badge(student_id: str, badge_code: str):
         'student_id_param': student_id,
         'points_to_add': points
     }).execute()
+async def handle_quiz_session(
+    phone: str,
+    student: dict,
+    conversation: dict,
+    message: str,
+    intent: str
+):
+    """
+    Manages an active quiz session.
     
+    When in quiz mode, the conversation flows like:
+    1. Student says "quiz me on Physics"
+    2. We send them a question
+    3. They answer A, B, C, or D
+    4. We tell them if they're right and why
+    5. We ask if they want another question
+    6. Repeat
+    """
+    from features.quiz_engine import (
+        get_question_for_student, format_question_for_whatsapp,
+        evaluate_quiz_answer, update_mastery_after_answer,
+        calculate_and_award_points
+    )
+    
+    state = conversation.get('conversation_state', {})
+    awaiting = state.get('awaiting_response_for')
+    
+    # If awaiting a quiz answer
+    if awaiting == 'quiz_answer':
+        current_question = state.get('current_question')
+        
+        if not current_question:
+            # Something went wrong, restart
+            await send_whatsapp_message(
+                phone,
+                "Let me restart your quiz session. What subject would you like to practice?"
+            )
+            return
+        
+        # Evaluate the answer
+        is_correct, feedback = evaluate_quiz_answer(
+            message.strip(),
+            current_question.get('correct_answer', 'A'),
+            current_question
+        )
+        
+        if is_correct is None:
+            # Couldn't parse the answer
+            await send_whatsapp_message(phone, feedback)
+            return
+        
+        # Update mastery
+        await update_mastery_after_answer(
+            student_id=student['id'],
+            subject=current_question.get('subject', ''),
+            topic=current_question.get('topic', ''),
+            question_difficulty=current_question.get('difficulty_level', 5),
+            is_correct=is_correct
+        )
+        
+        # Calculate and award points
+        points, badge = await calculate_and_award_points(
+            student_id=student['id'],
+            is_correct=is_correct,
+            question_difficulty=current_question.get('difficulty_level', 5)
+        )
+        
+        # Add points info to feedback
+        points_msg = f"\n\n+{points} points! 💰" if is_correct else f"\n\n+{points} points for trying."
+        
+        badge_msg = ""
+        if badge:
+            badge_msg = f"\n\n🏅 *New Badge: {badge['name']}!*\n{badge['description']}"
+        
+        full_feedback = feedback + points_msg + badge_msg
+        
+        # Increment question count
+        session_q = state.get('session_questions', 0) + 1
+        session_correct = state.get('session_correct', 0) + (1 if is_correct else 0)
+        
+        # After every 5 questions, show a mini progress update
+        if session_q % 5 == 0:
+            accuracy = round(session_correct / session_q * 100)
+            full_feedback += (
+                f"\n\n📊 *Session Update:*\n"
+                f"{session_q} questions | {session_correct} correct | {accuracy}% accuracy"
+            )
+        
+        full_feedback += "\n\n_Next question? Type *YES* or *NEXT*, or say what subject to switch to._"
+        
+        await send_whatsapp_message(phone, full_feedback)
+        
+        # Update conversation state
+        await update_conversation_state(conversation['id'], 'whatsapp', phone, {
+            'current_mode': 'quiz',
+            'conversation_state': {
+                **state,
+                'awaiting_response_for': 'quiz_continue',
+                'session_questions': session_q,
+                'session_correct': session_correct,
+                'last_question': current_question,
+            }
+        })
+        
+        return
+    
+    # Starting a new quiz or continuing
+    subject = conversation.get('current_subject') or extract_subject_from_message(message)
+    
+    if not subject:
+        await send_whatsapp_message(
+            phone,
+            "Which subject would you like to be quizzed on? 📚\n\n"
+            "You can say:\n"
+            "• *Quiz Physics*\n"
+            "• *Test me on Chemistry*\n"
+            "• *Quiz me on Mathematics*"
+        )
+        return
+    
+    topic = extract_topic_from_message(message)
+    
+    # Get a question
+    question = await get_question_for_student(
+        student_id=student['id'],
+        subject=subject,
+        topic=topic
+    )
+    
+    if not question:
+        await send_whatsapp_message(
+            phone,
+            f"I'm having trouble finding {subject} questions right now. 😕\n\n"
+            "Try: asking me to explain a topic first, then quiz you on it.\n"
+            "Or try a different subject."
+        )
+        return
+    
+    # Format and send the question
+    session_q = state.get('session_questions', 0)
+    formatted = format_question_for_whatsapp(question, session_q + 1)
+    await send_whatsapp_message(phone, formatted)
+    
+    # Save the question in state so we can evaluate the answer
+    await update_conversation_state(conversation['id'], 'whatsapp', phone, {
+        'current_mode': 'quiz',
+        'current_subject': subject,
+        'current_topic': topic or question.get('topic'),
+        'conversation_state': {
+            **state,
+            'awaiting_response_for': 'quiz_answer',
+            'current_question': question,
+            'session_questions': session_q,
+            'session_correct': state.get('session_correct', 0),
+        }
+    })
+
+def extract_subject_from_message(message: str) -> str | None:
+    """
+    Extracts a subject name from a message like "quiz me on Physics" or "test Chemistry."
+    """
+    subjects = [
+        'Mathematics', 'Math', 'Maths', 'Physics', 'Chemistry', 'Biology',
+        'English', 'English Language', 'Economics', 'Government', 'Literature',
+        'Geography', 'Commerce', 'Agricultural Science', 'Agric', 'Further Mathematics',
+        'History', 'Yoruba', 'Igbo', 'Hausa',
+    ]
+    
+    subject_map = {
+        'MATH': 'Mathematics', 'MATHS': 'Mathematics',
+        'ENGLISH': 'English Language', 'ENG': 'English Language',
+        'BIO': 'Biology', 'CHEM': 'Chemistry', 'PHY': 'Physics', 'PHYSICS': 'Physics',
+        'ECON': 'Economics', 'GOVT': 'Government', 'GOV': 'Government',
+        'LIT': 'Literature in English', 'LITERATURE': 'Literature in English',
+        'AGRIC': 'Agricultural Science', 'COMMERCE': 'Commerce', 'GEO': 'Geography',
+        'FURTHER MATH': 'Further Mathematics', 'FURTHER MATHS': 'Further Mathematics',
+    }
+    
+    msg_upper = message.upper()
+    
+    for abbrev, full_name in subject_map.items():
+        if abbrev in msg_upper:
+            return full_name
+    
+    for subject in subjects:
+        if subject.upper() in msg_upper:
+            return subject
+    
+    return None
+
+def extract_topic_from_message(message: str) -> str | None:
+    """
+    Tries to extract a specific topic from a message.
+    Example: "quiz me on Newton's Laws in Physics" → "Newton's Laws"
+    """
+    import re
+    
+    # Common patterns: "on [topic]", "about [topic]", "in [topic]"
+    patterns = [
+        r'on\s+(?:the\s+)?(.+?)(?:\s+in\s+\w+|$)',
+        r'about\s+(?:the\s+)?(.+?)(?:\s+in\s+\w+|$)',
+        r'regarding\s+(.+?)(?:\s+in\s+\w+|$)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, message, re.IGNORECASE)
+        if match:
+            topic = match.group(1).strip()
+            # Filter out if it's just a subject name
+            if len(topic) > 3 and topic.lower() not in ['physics', 'chemistry', 'biology', 'mathematics', 'english']:
+                return topic
+    
+    return None    
     return badge
