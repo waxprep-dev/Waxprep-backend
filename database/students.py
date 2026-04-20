@@ -22,6 +22,8 @@ async def create_student(
     school_name: str = None,
     state: str = None,
     referred_by_wax_id: str = None
+    # After record_referral() call:
+await check_and_award_referral_rewards(referrer_id)
 ) -> dict:
     """
     Creates a new student account.
