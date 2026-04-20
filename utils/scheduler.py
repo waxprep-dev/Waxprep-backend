@@ -409,3 +409,78 @@ async def midnight_tasks():
     # Log that a new day has started
     today = nigeria_today()
     print(f"✅ New day started: {today}")
+async def send_spaced_repetition_reminders():
+    """
+    Finds students who have topics due for review (spaced repetition).
+    Sends them a gentle nudge to review those topics.
+    
+    The Ebbinghaus forgetting curve says:
+    - Review after 1 day: retain 90%
+    - Review after 3 days: retain 80%
+    - Review after 7 days: retain 70%
+    
+    We track next_review_at in mastery_scores and trigger when it's due.
+    """
+    from database.client import supabase
+    from whatsapp.sender import send_whatsapp_message
+    from utils.helpers import nigeria_now
+    
+    now = nigeria_now()
+    
+    # Find topics due for review
+    due_reviews = supabase.table('mastery_scores')\
+        .select('student_id, subject, topic, mastery_score')\
+        .lte('next_review_at', now.isoformat())\
+        .gte('mastery_score', 20)\
+        .lt('mastery_score', 90)\
+        .limit(200)\
+        .execute()
+    
+    if not due_reviews.data:
+        return
+    
+    # Group by student
+    student_topics = {}
+    for record in due_reviews.data:
+        sid = record['student_id']
+        if sid not in student_topics:
+            student_topics[sid] = []
+        student_topics[sid].append(record)
+    
+    for student_id, topics in student_topics.items():
+        # Get student's WhatsApp
+        phone_result = supabase.table('platform_sessions').select('platform_user_id')\
+            .eq('student_id', student_id).eq('platform', 'whatsapp').execute()
+        
+        if not phone_result.data:
+            continue
+        
+        phone = phone_result.data[0]['platform_user_id']
+        
+        # Get student name
+        student_result = supabase.table('students').select('name, last_study_date')\
+            .eq('id', student_id).execute()
+        
+        if not student_result.data:
+            continue
+        
+        student = student_result.data[0]
+        
+        # Don't send if they've already studied today
+        from utils.helpers import nigeria_today
+        if student.get('last_study_date') == nigeria_today():
+            continue
+        
+        name = student['name'].split()[0]
+        topics_display = '\n'.join([f"• {t['subject']}: {t['topic']}" for t in topics[:3]])
+        
+        msg = (
+            f"📚 *Review Time, {name}!*\n\n"
+            f"These topics are ready for review — "
+            f"reviewing now will lock them into your memory:\n\n"
+            f"{topics_display}\n\n"
+            f"Type *REVISION* to start reviewing now! 🎯"
+        )
+        
+        await send_whatsapp_message(phone, msg)
+        await asyncio.sleep(0.3)
