@@ -54,7 +54,14 @@ def start_scheduler():
         replace_existing=True,
         name='Send Admin Report'
     )
-    
+    # Spaced repetition reminders — check twice daily
+scheduler.add_job(
+    send_spaced_repetition_reminders,
+    CronTrigger(hour='9,18', minute=0, timezone=NIGERIA_TZ),
+    id='spaced_repetition',
+    replace_existing=True,
+    name='Spaced Repetition Reminders'
+)
     # Trial expiry notifications — every hour
     scheduler.add_job(
         check_trial_expirations,
