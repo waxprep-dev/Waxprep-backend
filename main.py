@@ -142,32 +142,25 @@ async def whatsapp_webhook_receive(request: Request, background_tasks: Backgroun
 async def paystack_webhook(request: Request, background_tasks: BackgroundTasks):
     """
     Receives payment confirmation from Paystack.
-    
-    When a student pays for a subscription, Paystack sends a notification
-    to this URL confirming the payment.
-    
-    We verify the signature (to make sure it's really from Paystack)
-    then activate the student's subscription.
+    When a student pays, Paystack sends a notification here confirming payment.
     """
     import hmac
     import hashlib
     
-    # Verify the request is actually from Paystack
-    paystack_signature = request.headers.get("x-paystack-signature")
+    paystack_signature = request.headers.get("x-paystack-signature", "")
     body = await request.body()
     
-    computed_signature = hmac.new(
-        settings.PAYSTACK_SECRET_KEY.encode(),
-        body,
-        hashlib.sha512
-    ).hexdigest()
+    if settings.PAYSTACK_SECRET_KEY:
+        computed_signature = hmac.new(
+            settings.PAYSTACK_SECRET_KEY.encode('utf-8'),
+            body,
+            hashlib.sha512
+        ).hexdigest()
+        
+        if paystack_signature != computed_signature:
+            raise HTTPException(status_code=400, detail="Invalid Paystack signature")
     
-    if paystack_signature != computed_signature:
-        raise HTTPException(status_code=400, detail="Invalid signature")
-    
-    # Process payment in background
     background_tasks.add_task(process_paystack_webhook, body)
-    
     return JSONResponse(content={"status": "received"}, status_code=200)
 
 async def process_paystack_webhook(body: bytes):
