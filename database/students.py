@@ -332,7 +332,51 @@ async def record_referral(referrer_wax_id: str, referred_student_id: str, referr
         return
     
     referrer_id = referrer.data[0]['id']
+ async def check_and_award_referral_rewards(referrer_id: str):
+    """
+    Checks if a referrer has earned a referral milestone reward
+    and automatically applies it.
     
+    3 referrals = 7 days Pro free
+    10 referrals = 1 month Pro free
+    25 referrals = 1 year Scholar free
+    """
+    from database.client import supabase
+    from utils.helpers import nigeria_now
+    from datetime import timedelta
+    
+    referrer = supabase.table('students').select('referral_count, name')\
+        .eq('id', referrer_id).execute()
+    
+    if not referrer.data:
+        return
+    
+    count = referrer.data[0]['referral_count']
+    name = referrer.data[0]['name'].split()[0]
+    
+    reward = None
+    if count == 3:
+        reward = {'days': 7, 'tier': 'pro', 'message': f"🎉 *{name}, you referred 3 friends!*\n\nYou've earned 7 days of Pro Plan — FREE!\n\nYour Pro access has been activated. 🚀"}
+    elif count == 10:
+        reward = {'days': 30, 'tier': 'pro', 'message': f"🏆 *{name}, 10 referrals!*\n\nYou've earned 1 MONTH of Pro Plan — FREE!\n\nYou're making WaxPrep bigger. Thank you! 🙏"}
+    elif count == 25:
+        reward = {'days': 365, 'tier': 'scholar', 'message': f"👑 *{name}, 25 referrals!*\n\nYou've earned 1 FULL YEAR of Scholar Plan — FREE!\n\nYou're a WaxPrep legend. 🌟"}
+    
+    if reward:
+        new_expires = nigeria_now() + timedelta(days=reward['days'])
+        
+        await update_student(referrer_id, {
+            'subscription_tier': reward['tier'],
+            'subscription_expires_at': new_expires.isoformat(),
+        })
+        
+        # Send notification
+        phone_result = supabase.table('platform_sessions').select('platform_user_id')\
+            .eq('student_id', referrer_id).eq('platform', 'whatsapp').execute()
+        
+        if phone_result.data:
+            phone = phone_result.data[0]['platform_user_id']
+            await send_whatsapp_message(phone, reward['message'])   
     # Create referral record
     supabase.table('referrals').insert({
         'referrer_student_id': referrer_id,
