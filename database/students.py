@@ -188,38 +188,90 @@ async def check_and_reset_daily_questions(student: dict) -> dict:
     
     return student
 
-async def can_student_ask_question(student: dict) -> tuple[bool, str]:
+async def can_student_ask_question(student: dict) -> tuple:
     """
     Checks if a student can ask another question (hasn't hit their daily limit).
+    
+    IMPORTANT: This function re-fetches the student's current question count
+    from the database to avoid using a stale cached value.
+    
     Returns (can_ask: bool, message: str)
-    
-    The message is what we say to the student if they can't ask more.
     """
-    student = await check_and_reset_daily_questions(student)
-    status = await get_student_subscription_status(student)
-    effective_tier = status['effective_tier']
-    
-    limit = settings.get_daily_question_limit(effective_tier, status['is_trial'])
-    current = student.get('questions_today', 0)
-    
-    if current >= limit:
+    from config.settings import settings
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    student_id = student.get('id')
+    if not student_id:
+        return False, "Account not found. Please contact support."
+
+    # Always get fresh data for question count
+    fresh = supabase.table('students')\
+        .select('questions_today, questions_today_reset_date, subscription_tier, '
+                'subscription_expires_at, is_trial_active, trial_expires_at')\
+        .eq('id', student_id)\
+        .execute()
+
+    if not fresh.data:
+        return False, "Account not found."
+
+    fresh_student = fresh.data[0]
+
+    # Check if daily count needs resetting
+    today = datetime.now(ZoneInfo("Africa/Lagos")).strftime('%Y-%m-%d')
+    last_reset = fresh_student.get('questions_today_reset_date')
+
+    if last_reset != today:
+        # New day — reset the count in DB
+        supabase.table('students').update({
+            'questions_today': 0,
+            'questions_today_reset_date': today,
+            'updated_at': datetime.now(ZoneInfo("Africa/Lagos")).isoformat(),
+        }).eq('id', student_id).execute()
+        questions_today = 0
+    else:
+        questions_today = fresh_student.get('questions_today', 0)
+
+    # Determine subscription status
+    now = datetime.now(ZoneInfo("Africa/Lagos"))
+
+    # Check trial
+    trial_active = fresh_student.get('is_trial_active', False)
+    trial_expires_str = fresh_student.get('trial_expires_at')
+    is_on_trial = False
+
+    if trial_active and trial_expires_str:
+        try:
+            trial_exp = datetime.fromisoformat(trial_expires_str.replace('Z', '+00:00'))
+            if trial_exp > now:
+                is_on_trial = True
+        except Exception:
+            pass
+
+    if is_on_trial:
+        effective_tier = 'trial'
+    else:
+        effective_tier = fresh_student.get('subscription_tier', 'free')
+
+    limit = settings.get_daily_question_limit(effective_tier, is_on_trial)
+
+    if questions_today >= limit:
         if effective_tier == 'free':
             return False, (
                 f"You've used all {limit} free questions for today 📊\n\n"
-                f"Your questions reset at midnight.\n\n"
-                f"To keep studying right now, upgrade to Scholar Plan for just ₦1,500/month — "
-                f"that's less than ₦50 per day! You get 60 questions daily and much more.\n\n"
-                f"Type *SUBSCRIBE* to upgrade now, or come back at midnight for your free questions."
+                f"Your questions reset at midnight Nigerian time.\n\n"
+                f"*Scholar Plan — ₦1,500/month*\n"
+                f"Get 60 questions daily + image analysis + mock exams + much more.\n\n"
+                f"Type *SUBSCRIBE* to upgrade now. 💡"
             )
         else:
             return False, (
                 f"You've used all {limit} questions for today 📊\n\n"
-                f"Your questions reset at midnight Nigerian time.\n\n"
-                f"Great job putting in the work today! See you again at midnight 🌙"
+                f"Your questions reset at midnight. Great work today! 🌙\n\n"
+                f"Come back then for another full session."
             )
-    
-    return True, ""
 
+    return True, ""
 async def increment_questions_today(student_id: str):
     """Adds 1 to the student's question count for today."""
     supabase.rpc('increment_questions_today', {'student_id': student_id}).execute()
