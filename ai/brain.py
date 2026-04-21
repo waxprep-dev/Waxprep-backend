@@ -278,35 +278,32 @@ def _extract_text(response) -> str:
 
 
 def _build_gemini_tools():
-    """Converts tool definitions to Gemini format."""
-    gemini_tools = []
+    """
+    Builds Gemini tools in a format that works with the free API.
+    Simplified to avoid schema issues on the free tier.
+    """
+    declarations = []
     for tool in WAXPREP_TOOLS:
-        gemini_tools.append(
-            genai.protos.Tool(
-                function_declarations=[
-                    genai.protos.FunctionDeclaration(
-                        name=tool["name"],
-                        description=tool["description"],
-                        parameters=genai.protos.Schema(
-                            type=genai.protos.Type.OBJECT,
-                            properties={
-                                k: genai.protos.Schema(
-                                    type=genai.protos.Type.STRING if v.get("type") == "string" else
-                                         genai.protos.Type.INTEGER if v.get("type") == "integer" else
-                                         genai.protos.Type.STRING,
-                                    description=v.get("description", ""),
-                                    enum=v.get("enum", []) if "enum" in v else []
-                                )
-                                for k, v in tool.get("parameters", {}).get("properties", {}).items()
-                            },
-                            required=tool.get("parameters", {}).get("required", [])
-                        )
-                    )
-                ]
+        props = {}
+        for k, v in tool.get("parameters", {}).get("properties", {}).items():
+            schema = genai.protos.Schema(
+                type=genai.protos.Type.STRING,
+                description=v.get("description", "")
+            )
+            props[k] = schema
+
+        declarations.append(
+            genai.protos.FunctionDeclaration(
+                name=tool["name"],
+                description=tool["description"],
+                parameters=genai.protos.Schema(
+                    type=genai.protos.Type.OBJECT,
+                    properties=props
+                ) if props else None
             )
         )
-    return gemini_tools
 
+    return [genai.protos.Tool(function_declarations=declarations)]
 
 def _build_student_context(student: dict, conversation: dict) -> str:
     """Builds a context string about the student for the AI."""
