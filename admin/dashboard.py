@@ -954,6 +954,144 @@ async def admin_questions(phone: str, sub_command: str, rest: str):
         except Exception as e:
             await send_whatsapp_message(phone, f"❌ Error: {str(e)[:200]}")
 
+async def handle_admin_command(phone: str, message: str):
+    """
+    Main entry point for admin commands.
+    Now supports MODE SWITCH for testing as a student.
+    """
+    from whatsapp.sender import send_whatsapp_message
+
+    parts = message.strip().split(None, 2)
+
+    if len(parts) < 2:
+        await send_admin_help(phone)
+        return
+
+    command = parts[1].upper() if len(parts) > 1 else ''
+    rest = parts[2] if len(parts) > 2 else ''
+
+    # ============================================================
+    # MODE SWITCH — Test as a student from your own phone
+    # ============================================================
+    if command == 'STUDENT_MODE':
+        await _enable_student_mode(phone)
+        return
+
+    if command == 'ADMIN_MODE':
+        await _enable_admin_mode(phone)
+        return
+
+    # All other commands
+    if command == 'HELP':
+        await send_admin_help(phone)
+    elif command == 'STATS':
+        await admin_stats(phone)
+    elif command == 'REVENUE':
+        await admin_revenue(phone, rest.lower() if rest else 'today')
+    elif command == 'STUDENT':
+        await admin_student_profile(phone, rest.strip().upper())
+    elif command == 'SEARCH':
+        await admin_search_student(phone, rest.strip())
+    elif command == 'UPGRADE':
+        await admin_upgrade_student(phone, rest.strip())
+    elif command == 'BAN':
+        await admin_ban_student(phone, rest.strip())
+    elif command == 'UNBAN':
+        await admin_unban_student(phone, rest.strip().upper())
+    elif command == 'MSG':
+        await admin_message_student(phone, rest.strip())
+    elif command == 'BROADCAST':
+        await admin_broadcast(phone, rest.strip())
+    elif command == 'CODE':
+        await admin_manage_codes(phone, rest.strip())
+    elif command == 'QUESTIONS':
+        sub = rest.strip().upper().split()[0] if rest.strip() else ''
+        await admin_questions(phone, sub, rest)
+    elif command == 'REPORT':
+        from utils.scheduler import send_daily_admin_report
+        await send_whatsapp_message(phone, "⚙️ Generating report now...")
+        await send_daily_admin_report()
+    elif command == 'CHALLENGE':
+        from utils.scheduler import generate_daily_challenge
+        await send_whatsapp_message(phone, "⚙️ Generating challenge...")
+        await generate_daily_challenge()
+        await send_whatsapp_message(phone, "✅ Done!")
+    elif command == 'ONLINE':
+        await admin_online_count(phone)
+    elif command == 'TOP':
+        try:
+            n = int(rest.strip()) if rest.strip().isdigit() else 10
+        except Exception:
+            n = 10
+        await admin_top_students(phone, n)
+    else:
+        await send_whatsapp_message(
+            phone,
+            f"❓ Unknown command: *ADMIN {command}*\n\nType *ADMIN HELP* for all commands."
+        )
+
+
+async def _enable_student_mode(phone: str):
+    """
+    Switches admin to student testing mode.
+    The admin temporarily stops being treated as admin
+    and experiences WaxPrep exactly as a real student would.
+    """
+    from database.client import redis_client
+    from whatsapp.sender import send_whatsapp_message
+
+    redis_client.setex(f"admin_student_mode:{phone}", 3600, "1")  # 1 hour
+
+    await send_whatsapp_message(
+        phone,
+        "🎓 *Student Mode ON* (1 hour)\n\n"
+        "You are now experiencing WaxPrep as a student.\n"
+        "Everything you send will be processed as a real student message.\n\n"
+        "To go back to admin, type:\n"
+        "*ADMIN ADMIN_MODE*\n\n"
+        "_Now send 'Hi' to test the student onboarding!_"
+    )
+
+
+async def _enable_admin_mode(phone: str):
+    """Switches back to admin mode."""
+    from database.client import redis_client
+    from whatsapp.sender import send_whatsapp_message
+
+    redis_client.delete(f"admin_student_mode:{phone}")
+
+    await send_whatsapp_message(
+        phone,
+        "🛠️ *Admin Mode restored.*\n\nYou're back to admin. Type *ADMIN HELP* for commands."
+    )
+
+
+def is_admin(phone: str) -> bool:
+    """
+    Checks if a phone number is the admin.
+    Returns False if admin has switched to student testing mode.
+    """
+    from config.settings import settings
+
+    if not settings.ADMIN_WHATSAPP:
+        return False
+
+    def normalize(p: str) -> str:
+        return p.replace('+', '').replace(' ', '').replace('-', '')
+
+    if normalize(phone) != normalize(settings.ADMIN_WHATSAPP):
+        return False
+
+    # Check if admin has enabled student mode
+    try:
+        from database.client import redis_client
+        student_mode = redis_client.get(f"admin_student_mode:{phone}")
+        if student_mode:
+            return False  # In student mode — not treated as admin
+    except Exception:
+        pass
+
+    return True
 
 async def admin_online_count(phone: str):
     """Shows how many students are actively studying right now."""
