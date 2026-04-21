@@ -189,79 +189,95 @@ WAXPREP_TOOLS = [
 
 
 async def process_message_with_ai(
+async def process_message_with_ai(
     message: str,
     student: dict,
     conversation: dict,
     conversation_history: list
 ) -> str:
     """
-    The main function. Every student message comes here.
-    
-    Gemini reads the message, understands context, decides what action to take,
-    calls the right function, and returns a natural response.
-    
-    Returns the text response to send to the student.
+    Main AI brain. Every student message comes here.
+    Uses Gemini 2.0 Flash (free tier compatible).
+    Falls back to Groq if Gemini hits rate limits.
     """
-    
     student_context = _build_student_context(student, conversation)
     system_prompt = _build_system_prompt(student, student_context)
-    
-    # Format history for Gemini
+
     history = []
-    for msg in conversation_history[-12:]:
+    for msg in conversation_history[-10:]:
         role = "user" if msg.get("role") == "user" else "model"
         history.append({
             "role": role,
             "parts": [{"text": msg.get("content", "")}]
         })
-    
+
     try:
         model = genai.GenerativeModel(
             model_name=settings.GEMINI_MODEL,
             system_instruction=system_prompt,
-            tools=_build_gemini_tools(),
             generation_config=genai.types.GenerationConfig(
                 temperature=0.8,
-                max_output_tokens=1500,
+                max_output_tokens=1200,
             )
         )
-        
-        chat = model.start_chat(history=history)
-        response = chat.send_message(message)
-        
-        # Check if Gemini wants to call a function
-        if response.candidates[0].content.parts:
+
+        # Try with tools first
+        try:
+            model_with_tools = genai.GenerativeModel(
+                model_name=settings.GEMINI_MODEL,
+                system_instruction=system_prompt,
+                tools=_build_gemini_tools(),
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.8,
+                    max_output_tokens=1200,
+                )
+            )
+
+            chat = model_with_tools.start_chat(history=history)
+            response = chat.send_message(message)
+
+            # Check for function call
             for part in response.candidates[0].content.parts:
-                if hasattr(part, 'function_call') and part.function_call:
+                if hasattr(part, 'function_call') and part.function_call and part.function_call.name:
                     fn_name = part.function_call.name
                     fn_args = dict(part.function_call.args) if part.function_call.args else {}
-                    
-                    # Execute the function
+
                     fn_result = await _execute_tool(fn_name, fn_args, student, conversation, message)
-                    
-                    # Send result back to Gemini for natural response
+
                     function_response = chat.send_message(
                         genai.protos.Content(
                             parts=[genai.protos.Part(
                                 function_response=genai.protos.FunctionResponse(
                                     name=fn_name,
-                                    response={"result": fn_result}
+                                    response={"result": str(fn_result)}
                                 )
                             )]
                         )
                     )
-                    
+
                     return _extract_text(function_response)
-        
-        # No function call — direct response
-        return _extract_text(response)
-    
+
+            return _extract_text(response)
+
+        except Exception as tool_error:
+            # Tools failed — use plain Gemini without tools
+            print(f"Tools error, using plain Gemini: {tool_error}")
+            chat = model.start_chat(history=history)
+            response = chat.send_message(message)
+            return _extract_text(response)
+
     except Exception as e:
-        print(f"Brain error: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        # Fallback to simple Groq response
+        error_str = str(e)
+        print(f"Gemini error: {error_str}")
+
+        # Rate limit hit — use Groq as backup
+        if "429" in error_str or "quota" in error_str.lower() or "rate" in error_str.lower():
+            return await _fallback_response(message, student, conversation_history)
+
+        # Model not found — wrong model name
+        if "404" in error_str or "not found" in error_str.lower():
+            return await _fallback_response(message, student, conversation_history)
+
         return await _fallback_response(message, student, conversation_history)
 
 
