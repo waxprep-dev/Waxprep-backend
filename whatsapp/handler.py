@@ -196,22 +196,42 @@ async def process_single_message(message_data: dict, context: dict):
 
 
 async def _handle_admin_message(phone: str, message: str):
-    """Handles admin messages through the AI admin brain."""
+    """Handles admin messages. Tries AI brain first, falls back to direct commands."""
     from whatsapp.sender import send_whatsapp_message
-    from ai.brain import process_admin_message
 
+    msg_upper = message.strip().upper()
+
+    # Direct command pattern — always works, no AI needed
+    if msg_upper.startswith('ADMIN '):
+        try:
+            from admin.dashboard import handle_admin_command
+            await handle_admin_command(phone, message)
+            return
+        except Exception as e:
+            await send_whatsapp_message(phone, f"Admin command error: {str(e)[:100]}")
+            return
+
+    # Natural language admin — try AI brain
     try:
+        from ai.brain import process_admin_message
         response = await process_admin_message(message, phone)
         await send_whatsapp_message(phone, response)
     except Exception as e:
-        print(f"Admin brain error: {e}")
-        # Fall back to command-based admin for reliability
-        try:
-            from admin.dashboard import handle_admin_command
-            await handle_admin_command(phone, "ADMIN " + message)
-        except Exception as e2:
-            await send_whatsapp_message(phone, f"Admin error: {str(e)[:100]}")
-
+        print(f"Admin AI error: {e}")
+        # Show helpful fallback
+        await send_whatsapp_message(
+            phone,
+            "Hey! Quick admin tip:\n\n"
+            "You can ask me anything naturally, like:\n"
+            "• 'How many students do I have?'\n"
+            "• 'Send a message to all free users'\n"
+            "• 'Create a promo code'\n\n"
+            "Or use direct commands starting with ADMIN:\n"
+            "• ADMIN STATS\n"
+            "• ADMIN BROADCAST ALL [message]\n"
+            "• ADMIN CODE CREATE [code] trial 7 100\n\n"
+            "Type ADMIN HELP for the full list."
+        )
 
 async def _handle_exam_answer(phone: str, student: dict, conversation: dict, message: str, state: dict):
     """Handles answers during exam mode."""
