@@ -304,7 +304,6 @@ def _build_gemini_tools():
         )
 
     return [genai.protos.Tool(function_declarations=declarations)]
-
 def _build_student_context(student: dict, conversation: dict) -> str:
     """Builds a context string about the student for the AI."""
     name = student.get('name', 'Student')
