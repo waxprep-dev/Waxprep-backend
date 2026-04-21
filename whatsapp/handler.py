@@ -1,8 +1,8 @@
 """
-WhatsApp Message Handler — Complete Version
+WhatsApp Message Handler — Brain-Powered Version
 
-Every single WhatsApp message flows through this file.
-ALL cross-module imports are LAZY (inside functions) to prevent startup errors.
+Every message goes through the AI Brain.
+No rigid command routing. Natural conversation.
 """
 
 import json
@@ -13,12 +13,11 @@ from config.settings import settings
 ONBOARDING_STATES = {
     'new_or_existing', 'wax_id_entry', 'pin_entry', 'name',
     'class_level', 'target_exam', 'subjects', 'exam_date',
-    'state', 'language_pref', 'pin_setup', 'pin_confirm', 'referral_code'
+    'state', 'language_pref', 'pin_setup', 'pin_confirm'
 }
 
 
 async def handle_whatsapp_webhook(request: Request):
-    """Entry point — receives all WhatsApp messages."""
     try:
         body = await request.json()
     except Exception:
@@ -32,14 +31,23 @@ async def handle_whatsapp_webhook(request: Request):
                     await process_single_message(message_data, value)
                 except Exception as e:
                     import traceback
-                    print(f"❌ Message processing error: {e}")
+                    print(f"❌ Handler error: {e}")
                     traceback.print_exc()
 
     return {"status": "ok"}
 
 
 async def process_single_message(message_data: dict, context: dict):
-    """Processes one incoming WhatsApp message."""
+    """
+    Processes one WhatsApp message.
+    
+    The flow:
+    1. Who is this from?
+    2. Are they the admin?
+    3. Are they in the middle of onboarding?
+    4. Are they a registered student?
+    5. Pass to AI Brain
+    """
     from whatsapp.sender import send_whatsapp_message, mark_as_read
 
     message_id = message_data.get('id', '')
@@ -49,49 +57,48 @@ async def process_single_message(message_data: dict, context: dict):
     if not raw_phone:
         return
 
-    # Normalize phone — always store without + prefix for consistency
-    phone = _normalize_phone(raw_phone)
+    phone = _normalize(raw_phone)
 
-    # Mark as read
     if message_id:
         await mark_as_read(message_id)
 
-    # Route by message type
+    # Non-text messages
     if message_type == 'image':
-        await _handle_incoming_image(phone, message_data)
+        await _handle_image(phone, message_data)
         return
 
     if message_type in ['voice', 'audio']:
-        await _handle_incoming_voice(phone, message_data)
+        await _handle_voice(phone, message_data)
         return
 
     if message_type not in ['text', 'button']:
         return
 
-    # Extract text
-    if message_type == 'text':
-        message_text = message_data.get('text', {}).get('body', '').strip()
-    else:
-        message_text = message_data.get('button', {}).get('text', '').strip()
+    message_text = (
+        message_data.get('text', {}).get('body', '') or
+        message_data.get('button', {}).get('text', '')
+    ).strip()
 
     if not message_text:
         return
 
     # Sanitize
-    message_text = _sanitize(message_text)
+    import re
+    message_text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', message_text)[:2000]
+
+    print(f"📩 Processing message from: {phone} | Text: {message_text[:50]}")
 
     # ============================================================
-    # CHECK FOR ADMIN COMMANDS FIRST
-    # Only the admin's personal number can trigger these
+    # STEP 1: CHECK IF ADMIN
     # ============================================================
-    from admin.dashboard import is_admin, handle_admin_command
+    from admin.dashboard import is_admin
 
-    if message_text.upper().startswith('ADMIN') and is_admin(phone):
-        await handle_admin_command(phone, message_text)
+    if is_admin(phone):
+        await _handle_admin_message(phone, message_text)
         return
 
     # ============================================================
-    # REGULAR USER FLOW
+    # STEP 2: GET STUDENT + CONVERSATION
     # ============================================================
     from features.wax_id import student_exists_in_platform
 
@@ -101,33 +108,41 @@ async def process_single_message(message_data: dict, context: dict):
         from database.conversations import get_or_create_conversation
         conversation = await get_or_create_conversation(student['id'], 'whatsapp', phone)
     else:
-        conversation = await _get_or_create_temp_conversation(phone)
+        conversation = await _get_temp_conversation(phone)
 
-    # Parse state
+    # Store phone in conversation for tool use
+    conversation['platform_user_id'] = phone
+
+    # Get state
     raw_state = conversation.get('conversation_state', {})
-    if isinstance(raw_state, str):
-        try:
-            state = json.loads(raw_state)
-        except Exception:
-            state = {}
-    else:
-        state = raw_state or {}
+    state = json.loads(raw_state) if isinstance(raw_state, str) else (raw_state or {})
+    awaiting = state.get('awaiting_response_for', '')
 
-    awaiting = state.get('awaiting_response_for') or conversation.get('awaiting_response_for', '')
-
-    # PRIORITY 1: Onboarding states
+    # ============================================================
+    # STEP 3: ONBOARDING CHECK
+    # ============================================================
     if awaiting in ONBOARDING_STATES:
         from whatsapp.flows.onboarding import handle_onboarding_response
         await handle_onboarding_response(phone, conversation, message_text)
         return
 
-    # PRIORITY 2: No student — start onboarding
     if not student:
         from whatsapp.flows.onboarding import handle_new_or_existing
         await handle_new_or_existing(phone, conversation, message_text)
         return
 
-    # Save incoming message
+    # ============================================================
+    # STEP 4: EXAM MODE (strict — only answers allowed)
+    # ============================================================
+    current_mode = conversation.get('current_mode', 'default')
+
+    if current_mode == 'exam' or awaiting == 'exam_answer':
+        await _handle_exam_answer(phone, student, conversation, message_text, state)
+        return
+
+    # ============================================================
+    # STEP 5: SAVE MESSAGE TO HISTORY
+    # ============================================================
     from database.conversations import save_message
     await save_message(
         conversation_id=conversation['id'],
@@ -137,142 +152,334 @@ async def process_single_message(message_data: dict, context: dict):
         content=message_text
     )
 
-    # PRIORITY 3: Exam mode — only STOP EXAM allowed
-    current_mode = conversation.get('current_mode', 'default')
-    if current_mode == 'exam' or awaiting == 'exam_answer':
-        if 'STOP' in message_text.upper():
-            from whatsapp.flows.mock_exam import end_exam_early
-            await end_exam_early(phone, student, conversation, state)
-        else:
-            from whatsapp.flows.mock_exam import handle_exam_answer
-            await handle_exam_answer(phone, student, conversation, message_text)
-        return
-
-    # PRIORITY 4: Challenge answer
-    if awaiting == 'challenge_answer':
-        from whatsapp.flows.study import handle_challenge_answer
-        await handle_challenge_answer(phone, student, conversation, message_text, state)
-        return
-
-    # PRIORITY 5: Quiz answer
-    if awaiting == 'quiz_answer':
-        from whatsapp.flows.study import handle_quiz_answer
-        await handle_quiz_answer(phone, student, conversation, message_text, state)
-        return
-
-    # PRIORITY 6: Quiz continuation (yes/no for next question)
-    if awaiting == 'quiz_continue':
-        msg_upper = message_text.strip().upper()
-        if msg_upper in ['YES', 'Y', 'NEXT', 'CONTINUE', '1', 'ANOTHER', 'MORE']:
-            from whatsapp.flows.study import deliver_quiz_question
-            subject = conversation.get('current_subject', '')
-            topic = conversation.get('current_topic', '')
-            await deliver_quiz_question(phone, student, conversation, subject, topic, state)
-        else:
-            from whatsapp.flows.study import handle_academic_message
-            from ai.classifier import classify_message_fast
-            intent = classify_message_fast(message_text, state)
-            await handle_academic_message(phone, student, conversation, message_text, intent)
-        return
-
-    # PRIORITY 7: Classify the message
-    from ai.classifier import classify_message_fast
-    intent = classify_message_fast(message_text, state)
-
-    # PRIORITY 8: Commands
-    if intent == 'COMMAND':
-        command = message_text.strip().upper().split()[0]
-
-        if command == 'SUBSCRIBE' or ('SCHOLAR' in message_text.upper() and
-                                       any(w in message_text.upper() for w in ['MONTHLY', 'YEARLY', 'PLAN'])):
-            from whatsapp.flows.subscription import handle_subscription_flow
-            await handle_subscription_flow(phone, student, conversation, message_text)
-            return
-
-        if command in ['CHALLENGE', 'DAILY']:
-            from whatsapp.flows.study import handle_daily_challenge
-            await handle_daily_challenge(phone, student, conversation)
-            return
-
-        if command == 'EXAM' or 'MOCK EXAM' in message_text.upper():
-            from whatsapp.flows.mock_exam import start_mock_exam
-            await start_mock_exam(phone, student, conversation)
-            return
-
-        from whatsapp.flows.commands import handle_command
-        await handle_command(phone, student, conversation, message_text, command)
-        return
-
-    # PRIORITY 9: Promo code
-    if intent == 'PROMO_CODE':
-        from whatsapp.flows.commands import handle_command
-        await handle_command(phone, student, conversation, message_text, 'PROMO')
-        return
-
-    # PRIORITY 10: Check question limits
+    # ============================================================
+    # STEP 6: CHECK QUESTION LIMITS
+    # ============================================================
     from database.students import can_student_ask_question
-    can_ask, limit_message = await can_student_ask_question(student)
+    can_ask, limit_msg = await can_student_ask_question(student)
 
     if not can_ask:
-        from whatsapp.sender import send_whatsapp_message
-        await send_whatsapp_message(phone, limit_message)
+        await send_whatsapp_message(phone, limit_msg)
         return
 
-    # PRIORITY 11: Study messages (the main learning experience)
-    from whatsapp.flows.study import handle_study_message
-    await handle_study_message(phone, student, conversation, message_text, intent)
+    # ============================================================
+    # STEP 7: PASS TO AI BRAIN
+    # The AI handles everything naturally from here
+    # ============================================================
+    from database.conversations import get_conversation_history
+    from ai.brain import process_message_with_ai
 
-    # Update stats after studying
-    from database.students import increment_questions_today
-    await increment_questions_today(student['id'])
+    history = await get_conversation_history(conversation['id'])
+
+    response = await process_message_with_ai(
+        message=message_text,
+        student=student,
+        conversation=conversation,
+        conversation_history=history
+    )
+
+    await send_whatsapp_message(phone, response)
+
+    # Save response
+    await save_message(
+        conversation_id=conversation['id'],
+        student_id=student['id'],
+        platform='whatsapp',
+        role='assistant',
+        content=response
+    )
+
+    # Update streak
     await _update_streak(student)
 
-
-def _normalize_phone(phone: str) -> str:
-    """Normalizes phone to format without +, e.g. 2348012345678."""
-    phone = phone.replace('+', '').replace(' ', '').replace('-', '')
-    if phone.startswith('0') and len(phone) == 11:
-        phone = '234' + phone[1:]
-    elif not phone.startswith('234') and len(phone) == 10:
-        phone = '234' + phone
-    return phone
+    print(f"✅ Response sent to {phone}")
 
 
-def _sanitize(text: str) -> str:
-    """Removes potentially dangerous characters from user input."""
-    import re
-    text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
-    return text.strip()[:2000]
+async def _handle_admin_message(phone: str, message: str):
+    """Handles admin messages through the AI admin brain."""
+    from whatsapp.sender import send_whatsapp_message
+    from ai.brain import process_admin_message
+
+    try:
+        response = await process_admin_message(message, phone)
+        await send_whatsapp_message(phone, response)
+    except Exception as e:
+        print(f"Admin brain error: {e}")
+        # Fall back to command-based admin for reliability
+        try:
+            from admin.dashboard import handle_admin_command
+            await handle_admin_command(phone, "ADMIN " + message)
+        except Exception as e2:
+            await send_whatsapp_message(phone, f"Admin error: {str(e)[:100]}")
 
 
-async def _get_or_create_temp_conversation(phone: str) -> dict:
-    """Creates a temporary conversation record for unregistered users."""
+async def _handle_exam_answer(phone: str, student: dict, conversation: dict, message: str, state: dict):
+    """Handles answers during exam mode."""
+    from whatsapp.sender import send_whatsapp_message
+
+    if any(w in message.upper() for w in ['STOP', 'END', 'QUIT', 'EXIT']):
+        from database.conversations import update_conversation_state
+        await update_conversation_state(conversation['id'], 'whatsapp', phone, {
+            'current_mode': 'default',
+            'conversation_state': {},
+        })
+        await send_whatsapp_message(
+            phone,
+            f"Exam ended. Good job for practicing!\n\n"
+            "Type anything to continue studying."
+        )
+        return
+
+    answer = message.strip().upper()
+    if answer not in ['A', 'B', 'C', 'D']:
+        await send_whatsapp_message(
+            phone,
+            "During the exam, reply with *A*, *B*, *C*, or *D* only.\n\n"
+            "_(Type STOP to end the exam)_"
+        )
+        return
+
+    questions = state.get('all_questions', [])
+    question_ids = state.get('questions', [])
+    current_idx = state.get('current_question_index', 0)
+    answers = state.get('answers', {})
+    correct_count = state.get('correct_count', 0)
+
+    # Get current question
+    current_q = None
+    if current_idx < len(questions):
+        current_q = questions[current_idx]
+    elif current_idx < len(question_ids):
+        from database.client import supabase
+        q_result = supabase.table('questions').select('*').eq('id', question_ids[current_idx]).execute()
+        current_q = q_result.data[0] if q_result.data else None
+
+    if not current_q:
+        await _complete_exam(phone, student, conversation, state, correct_count, len(question_ids or questions))
+        return
+
+    correct = current_q.get('correct_answer', 'A').upper()
+    is_correct = answer == correct
+
+    answers[str(current_idx)] = {'answer': answer, 'correct': correct, 'is_correct': is_correct,
+                                   'subject': current_q.get('subject', '')}
+
+    if is_correct:
+        correct_count += 1
+
+    next_idx = current_idx + 1
+    total = len(question_ids or questions)
+
+    if next_idx >= total:
+        state['answers'] = answers
+        state['correct_count'] = correct_count
+        await _complete_exam(phone, student, conversation, state, correct_count, total)
+        return
+
+    # Next question
+    next_q = None
+    if next_idx < len(questions):
+        next_q = questions[next_idx]
+    else:
+        from database.client import supabase
+        q_result = supabase.table('questions').select('*').eq('id', question_ids[next_idx]).execute()
+        next_q = q_result.data[0] if q_result.data else None
+
+    from database.conversations import update_conversation_state
+    await update_conversation_state(conversation['id'], 'whatsapp', phone, {
+        'conversation_state': {
+            **state,
+            'current_question_index': next_idx,
+            'answers': answers,
+            'correct_count': correct_count,
+        }
+    })
+
+    if next_q:
+        from database.students import increment_questions_today
+        await increment_questions_today(student['id'])
+
+        q_text = next_q.get('question_text', '')
+        a = next_q.get('option_a', '')
+        b = next_q.get('option_b', '')
+        c = next_q.get('option_c', '')
+        d = next_q.get('option_d', '')
+
+        await send_whatsapp_message(
+            phone,
+            f"*[{next_idx + 1}/{total}]* _{next_q.get('subject', '')}_\n\n"
+            f"{q_text}\n\n"
+            f"A. {a}\nB. {b}\nC. {c}\nD. {d}"
+        )
+    else:
+        await _complete_exam(phone, student, conversation, state, correct_count, total)
+
+
+async def _complete_exam(phone: str, student: dict, conversation: dict, state: dict, correct: int, total: int):
+    """Completes an exam and shows results."""
+    from whatsapp.sender import send_whatsapp_message
+    from database.conversations import update_conversation_state
+    from database.client import supabase
+    from helpers import nigeria_now
+
+    pct = round((correct / total * 100) if total > 0 else 0)
+    jamb_equiv = round((correct / total) * 400) if total > 0 else 0
+
+    await update_conversation_state(conversation['id'], 'whatsapp', phone, {
+        'current_mode': 'default',
+        'conversation_state': {},
+    })
+
+    name = student.get('name', 'Student').split()[0]
+
+    result_msg = (
+        f"📝 *Exam Complete, {name}!*\n\n"
+        f"Score: *{correct}/{total}* ({pct}%)\n"
+    )
+
+    if total >= 40:
+        result_msg += f"JAMB equivalent: *{jamb_equiv}/400*\n"
+
+    result_msg += "\n"
+
+    if pct >= 80:
+        result_msg += "Outstanding performance! 🏆 You're exam-ready.\n\n"
+    elif pct >= 60:
+        result_msg += "Good work! A few more sessions and you'll be flying. 💪\n\n"
+    else:
+        result_msg += "Keep going — every exam you practice makes you stronger. 🔥\n\n"
+
+    result_msg += "Ask me anything to continue studying."
+
+    await send_whatsapp_message(phone, result_msg)
+
+    # Update exam record
+    exam_id = state.get('exam_id')
+    if exam_id:
+        try:
+            supabase.table('mock_exams').update({
+                'score': correct,
+                'percentage': pct,
+                'status': 'completed',
+                'completed_at': nigeria_now().isoformat(),
+            }).eq('id', exam_id).execute()
+        except Exception:
+            pass
+
+    # Award badge
+    await award_badge(student['id'], 'MOCK_FIRST')
+
+
+async def _handle_image(phone: str, message_data: dict):
+    from whatsapp.sender import send_whatsapp_message
+    from features.wax_id import student_exists_in_platform
+
+    student = await student_exists_in_platform('whatsapp', phone)
+
+    if not student:
+        await send_whatsapp_message(phone, "Send me a message to get started first!")
+        return
+
+    from database.students import get_student_subscription_status
+    status = await get_student_subscription_status(student)
+
+    if status['effective_tier'] == 'free' and not status['is_trial']:
+        await send_whatsapp_message(
+            phone,
+            "Image analysis is available on Scholar Plan! 📸\n\n"
+            "Just say 'how do I subscribe?' and I'll help you get set up."
+        )
+        return
+
+    image_id = message_data.get('image', {}).get('id')
+    caption = message_data.get('image', {}).get('caption', '')
+
+    if not image_id:
+        return
+
+    await send_whatsapp_message(phone, "📸 Analyzing your image... _(~10 seconds)_")
+
+    try:
+        from ai.openai_client import download_whatsapp_image, analyze_image
+        image_b64 = await download_whatsapp_image(image_id)
+
+        if not image_b64:
+            await send_whatsapp_message(phone, "I couldn't read that image. Try sending it again, or type your question.")
+            return
+
+        prompt = f"Student question: {caption}" if caption else None
+        response = await analyze_image(image_base64=image_b64, prompt=prompt, student=student)
+        await send_whatsapp_message(phone, response)
+
+        from database.students import increment_questions_today
+        await increment_questions_today(student['id'])
+
+    except Exception as e:
+        print(f"Image error: {e}")
+        await send_whatsapp_message(phone, "Couldn't process that image. Please try again or type your question.")
+
+
+async def _handle_voice(phone: str, message_data: dict):
+    from whatsapp.sender import send_whatsapp_message
+    from features.wax_id import student_exists_in_platform
+
+    student = await student_exists_in_platform('whatsapp', phone)
+
+    if not student:
+        await send_whatsapp_message(phone, "Send a message to get started first!")
+        return
+
+    audio_id = (message_data.get('audio', {}) or message_data.get('voice', {})).get('id')
+    if not audio_id:
+        return
+
+    await send_whatsapp_message(phone, "🎙️ Listening to your voice note...")
+
+    try:
+        from ai.openai_client import transcribe_voice_note
+        transcribed = await transcribe_voice_note(audio_id)
+
+        if not transcribed:
+            await send_whatsapp_message(phone, "Couldn't understand that. Please type your question.")
+            return
+
+        await send_whatsapp_message(phone, f"🎙️ I heard: _{transcribed}_\n\nLet me help with that...")
+
+        fake_data = {'id': audio_id, 'from': phone, 'type': 'text', 'text': {'body': transcribed}}
+        await process_single_message(fake_data, {})
+
+    except Exception as e:
+        print(f"Voice error: {e}")
+        await send_whatsapp_message(phone, "Voice note failed. Please type your question.")
+
+
+async def _get_temp_conversation(phone: str) -> dict:
     from database.client import supabase, redis_client
 
     cache_key = f"conv:whatsapp:{phone}"
     try:
         cached = redis_client.get(cache_key)
         if cached:
-            return json.loads(cached)
+            result = json.loads(cached)
+            result['platform_user_id'] = phone
+            return result
     except Exception:
         pass
 
     try:
-        result = supabase.table('conversations').select('*')\
-            .eq('platform', 'whatsapp')\
-            .eq('platform_user_id', phone)\
-            .execute()
+        existing = supabase.table('conversations').select('*')\
+            .eq('platform', 'whatsapp').eq('platform_user_id', phone).execute()
 
-        if result.data:
-            conv = result.data[0]
+        if existing.data:
+            conv = existing.data[0]
         else:
-            insert_result = supabase.table('conversations').insert({
+            insert = supabase.table('conversations').insert({
                 'platform': 'whatsapp',
                 'platform_user_id': phone,
                 'current_mode': 'onboarding',
                 'conversation_state': {'awaiting_response_for': 'new_or_existing'},
             }).execute()
-            conv = insert_result.data[0] if insert_result.data else {
+            conv = insert.data[0] if insert.data else {
                 'id': f'temp_{phone}',
                 'conversation_state': {'awaiting_response_for': 'new_or_existing'},
                 'current_mode': 'onboarding'
@@ -283,6 +490,7 @@ async def _get_or_create_temp_conversation(phone: str) -> dict:
         except Exception:
             pass
 
+        conv['platform_user_id'] = phone
         return conv
 
     except Exception as e:
@@ -290,183 +498,59 @@ async def _get_or_create_temp_conversation(phone: str) -> dict:
         return {
             'id': f'temp_{phone}',
             'conversation_state': {'awaiting_response_for': 'new_or_existing'},
-            'current_mode': 'onboarding'
+            'current_mode': 'onboarding',
+            'platform_user_id': phone
         }
 
 
-async def _handle_incoming_image(phone: str, message_data: dict):
-    """Handles image messages from students."""
-    from features.wax_id import student_exists_in_platform
-    from whatsapp.sender import send_whatsapp_message
-
-    student = await student_exists_in_platform('whatsapp', phone)
-
-    if not student:
-        await send_whatsapp_message(phone, "Please sign up first! Type *HI* to get started.")
-        return
-
-    from database.students import get_student_subscription_status
-    status = await get_student_subscription_status(student)
-
-    if status['effective_tier'] == 'free' and not status['is_trial']:
-        await send_whatsapp_message(
-            phone,
-            "📸 *Image Analysis — Scholar Feature*\n\n"
-            "Scholar Plan lets you send photos of textbooks, notes, and past papers!\n\n"
-            "Type *SUBSCRIBE* to unlock. ✅"
-        )
-        return
-
-    image_data = message_data.get('image', {})
-    image_id = image_data.get('id')
-    caption = image_data.get('caption', '')
-
-    if not image_id:
-        return
-
-    await send_whatsapp_message(phone, "📸 Got your image! Analyzing... _(~10 seconds)_ 🔍")
-
-    try:
-        from ai.openai_client import download_whatsapp_image, analyze_image
-        image_b64 = await download_whatsapp_image(image_id)
-
-        if not image_b64:
-            await send_whatsapp_message(phone, "❌ Couldn't download that image. Please try again.")
-            return
-
-        prompt = None
-        if caption:
-            prompt = (
-                f"The student asks: '{caption}'\n\n"
-                f"Analyze this image and answer. Student is preparing for {student.get('target_exam', 'JAMB')}."
-            )
-
-        response = await analyze_image(image_base64=image_b64, prompt=prompt, student=student)
-        await send_whatsapp_message(phone, response)
-
-        from database.students import increment_questions_today
-        await increment_questions_today(student['id'])
-
-    except Exception as e:
-        print(f"Image analysis error: {e}")
-        await send_whatsapp_message(
-            phone,
-            "❌ Couldn't analyze that image right now.\n\nPlease type your question instead."
-        )
-
-
-async def _handle_incoming_voice(phone: str, message_data: dict):
-    """Handles voice notes from students."""
-    from features.wax_id import student_exists_in_platform
-    from whatsapp.sender import send_whatsapp_message
-
-    student = await student_exists_in_platform('whatsapp', phone)
-
-    if not student:
-        await send_whatsapp_message(phone, "Please sign up first! Type *HI* to get started.")
-        return
-
-    from database.students import get_student_subscription_status
-    status = await get_student_subscription_status(student)
-
-    if status['effective_tier'] == 'free' and not status['is_trial']:
-        await send_whatsapp_message(
-            phone,
-            "🎙️ Voice notes are a Scholar Plan feature!\n\nType *SUBSCRIBE* to unlock."
-        )
-        return
-
-    audio_data = message_data.get('audio', {}) or message_data.get('voice', {})
-    audio_id = audio_data.get('id')
-
-    if not audio_id:
-        return
-
-    await send_whatsapp_message(phone, "🎙️ Listening... _(transcribing now)_ ✨")
-
-    try:
-        from ai.openai_client import transcribe_voice_note
-        transcribed = await transcribe_voice_note(audio_id)
-
-        if not transcribed:
-            await send_whatsapp_message(
-                phone,
-                "❌ Couldn't understand that voice note.\n\nPlease speak clearly or type your question."
-            )
-            return
-
-        await send_whatsapp_message(phone, f"🎙️ I heard:\n_{transcribed}_\n\nProcessing...")
-
-        # Process as text
-        fake_data = {'id': audio_id, 'from': phone, 'type': 'text', 'text': {'body': transcribed}}
-        await process_single_message(fake_data, {})
-
-    except Exception as e:
-        print(f"Voice transcription error: {e}")
-        await send_whatsapp_message(phone, "❌ Voice note failed. Please type your question.")
+def _normalize(phone: str) -> str:
+    phone = phone.replace('+', '').replace(' ', '').replace('-', '')
+    if phone.startswith('0') and len(phone) == 11:
+        phone = '234' + phone[1:]
+    elif not phone.startswith('234') and len(phone) == 10:
+        phone = '234' + phone
+    return phone
 
 
 async def award_badge(student_id: str, badge_code: str) -> dict | None:
-    """Awards a badge to a student if they don't already have it."""
     from database.client import supabase
 
     try:
-        badge_result = supabase.table('badges').select('*').eq('badge_code', badge_code).execute()
-        if not badge_result.data:
+        badge = supabase.table('badges').select('*').eq('badge_code', badge_code).execute()
+        if not badge.data:
             return None
 
-        badge = badge_result.data[0]
-
-        existing = supabase.table('student_badges')\
-            .select('id')\
-            .eq('student_id', student_id)\
-            .eq('badge_id', badge['id'])\
-            .execute()
+        b = badge.data[0]
+        existing = supabase.table('student_badges').select('id')\
+            .eq('student_id', student_id).eq('badge_id', b['id']).execute()
 
         if existing.data:
             return None
 
-        supabase.table('student_badges').insert({
-            'student_id': student_id,
-            'badge_id': badge['id'],
-        }).execute()
+        supabase.table('student_badges').insert({'student_id': student_id, 'badge_id': b['id']}).execute()
+        supabase.rpc('add_points_to_student', {'student_id_param': student_id, 'points_to_add': b.get('points_awarded', 50)}).execute()
+        return b
 
-        points = badge.get('points_awarded', 50)
-        supabase.rpc('add_points_to_student', {
-            'student_id_param': student_id,
-            'points_to_add': points
-        }).execute()
-
-        return badge
-
-    except Exception as e:
-        print(f"Award badge error: {e}")
+    except Exception:
         return None
 
 
 async def _update_streak(student: dict):
-    """Updates the student's streak and awards streak badges."""
     from database.students import update_student
+    from helpers import nigeria_today
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
 
     now = datetime.now(ZoneInfo("Africa/Lagos"))
-    today = now.strftime('%Y-%m-%d')
-    last_study = student.get('last_study_date')
-    current_streak = student.get('current_streak', 0)
+    today = nigeria_today()
+    last = student.get('last_study_date')
+    streak = student.get('current_streak', 0)
 
-    if last_study == today:
-        return  # Already studied today, streak unchanged
+    if last == today:
+        return
 
     yesterday = (now - timedelta(days=1)).strftime('%Y-%m-%d')
-
-    if last_study == yesterday:
-        new_streak = current_streak + 1
-    elif last_study is None:
-        new_streak = 1
-    else:
-        new_streak = 1  # Streak broken, restart
-
+    new_streak = (streak + 1) if last == yesterday else 1
     longest = max(student.get('longest_streak', 0), new_streak)
 
     await update_student(student['id'], {
@@ -475,30 +559,5 @@ async def _update_streak(student: dict):
         'last_study_date': today,
     })
 
-    # Check streak badge milestones
-    badge_map = {7: 'STREAK_7', 14: 'STREAK_14', 30: 'STREAK_30', 60: 'STREAK_60', 100: 'STREAK_100'}
-
-    if new_streak in badge_map:
-        await award_badge(student['id'], badge_map[new_streak])
-
-        # Send milestone message
-        milestone_messages = {
-            7: "🔥 *7-day streak!* One week of consistency. This is how it starts. Keep going!",
-            14: "⚡ *14-day streak!* Two weeks straight. You're in the top 20% by consistency.",
-            30: "💫 *30-day streak!* One FULL MONTH! Monthly Master badge earned. 🏆",
-            60: "💎 *60 days straight!* Diamond Dedication badge earned. Rare. Keep it up.",
-            100: "👑 *100 DAYS!* Century Scholar! You are one of the most dedicated students in Nigeria. 🇳🇬",
-        }
-
-        if new_streak in milestone_messages:
-            from database.client import supabase
-            from whatsapp.sender import send_whatsapp_message
-
-            phone_result = supabase.table('platform_sessions').select('platform_user_id')\
-                .eq('student_id', student['id']).eq('platform', 'whatsapp').execute()
-
-            if phone_result.data:
-                phone = phone_result.data[0]['platform_user_id']
-                name = student.get('name', 'Student').split()[0]
-                msg = milestone_messages[new_streak].replace('!', f', {name}!', 1)
-                await send_whatsapp_message(phone, msg)
+    if new_streak in {7, 14, 30, 60, 100}:
+        await award_badge(student['id'], f'STREAK_{new_streak}')
