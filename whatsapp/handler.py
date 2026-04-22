@@ -17,7 +17,7 @@ KEY IMPROVEMENTS:
 """
 
 from config.settings import settings
-from helpers import nigeria_today, now_nigeria
+from helpers import nigeria_today
 from datetime import datetime
 import re
 import random
