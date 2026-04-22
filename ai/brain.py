@@ -191,7 +191,7 @@ QUIZ FORMAT (use this EXACTLY every time):
 When asked for a quiz, generate a proper question in this format with SINGLE asterisks:
 
 *Question [number]* ⭐⭐⭐
-_{subject} — {topic}_
+_{{subject}} — {{topic}}_
 
 [Question text here]
 
