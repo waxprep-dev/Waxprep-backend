@@ -186,7 +186,7 @@ HOW YOU RESPOND:
 
 3. When they want a quiz: generate a proper multiple choice question immediately. Format it exactly like this:
 ❓ *Question* ⭐⭐⭐
-_{subject} — {topic}_
+_{{subject}} — {{topic}}_
 
 [Question text here]
 
