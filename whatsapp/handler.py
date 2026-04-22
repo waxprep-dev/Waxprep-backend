@@ -1,15 +1,16 @@
 """
 WhatsApp Handler — Enhanced Natural Conversation Edition
 
-FIXES:
-1. Removed duplicate _handle_voice function
-2. Better conversation state management
-3. Smarter routing with context awareness
-4. Natural conversation hooks after every interaction
-5. Better error handling that never leaves students hanging
+FIXES APPLIED:
+1. Fixed import: removed broken 'now_nigeria' import (function is 'nigeria_now' in helpers)
+2. Added process_single_message() — main.py expects this function but it was missing
+3. Better conversation state management
+4. Smarter routing with context awareness
+5. Natural conversation hooks after every interaction
+6. Better error handling that never leaves students hanging
 
 KEY IMPROVEMENTS:
-- Single voice handler (bug fix)
+- process_single_message wrapper unpacks webhook data and routes to process_message
 - Context-aware message routing
 - Smoother transitions between modes
 - Better admin detection
@@ -24,12 +25,161 @@ import random
 
 
 # ============================================================
+# WEBHOOK ENTRY POINT (called by main.py)
+# ============================================================
+
+async def process_single_message(message_data: dict, value: dict) -> None:
+    """
+    Unpacks a WhatsApp webhook message and routes it to process_message.
+    This is the function main.py calls — it handles the raw webhook format.
+
+    Args:
+        message_data: The individual message dict from the webhook
+        value: The 'value' dict containing metadata, contacts, etc.
+    """
+    from whatsapp.sender import send_whatsapp_message
+
+    # Extract sender info
+    phone = message_data.get('from', '')
+    message_id = message_data.get('id', '')
+
+    # Extract contact name from the contacts array in value
+    name = "Student"
+    contacts = value.get('contacts', [])
+    if contacts:
+        name = contacts[0].get('profile', {}).get('name', 'Student')
+
+    # Determine message type and extract content
+    message_type = message_data.get('type', 'text')
+    media_url = None
+    message = ""
+
+    if message_type == 'text':
+        text_data = message_data.get('text', {})
+        message = text_data.get('body', '')
+
+    elif message_type == 'image':
+        image_data = message_data.get('image', {})
+        message = image_data.get('caption', '')
+        media_url = image_data.get('link', '')
+        # If no direct link, construct from media ID if available
+        if not media_url:
+            media_id = image_data.get('id', '')
+            if media_id:
+                media_url = await _get_media_url(media_id)
+
+    elif message_type == 'voice' or message_type == 'audio':
+        audio_data = message_data.get('audio', {})
+        media_url = audio_data.get('link', '')
+        if not media_url:
+            media_id = audio_data.get('id', '')
+            if media_id:
+                media_url = await _get_media_url(media_id)
+        # For voice notes, the 'message' can be empty or a transcription hint
+        message = message_data.get('text', {}).get('body', '')
+
+    elif message_type == 'document':
+        doc_data = message_data.get('document', {})
+        message = doc_data.get('caption', '')
+        media_url = doc_data.get('link', '')
+
+    elif message_type == 'video':
+        video_data = message_data.get('video', {})
+        message = video_data.get('caption', '')
+        media_url = video_data.get('link', '')
+
+    elif message_type == 'button':
+        button_data = message_data.get('button', {})
+        message = button_data.get('text', '')
+
+    elif message_type == 'interactive':
+        interactive_data = message_data.get('interactive', {})
+        if 'button_reply' in interactive_data:
+            message = interactive_data['button_reply'].get('title', '')
+        elif 'list_reply' in interactive_data:
+            message = interactive_data['list_reply'].get('title', '')
+
+    else:
+        # Fallback: try to get any text we can find
+        message = message_data.get('text', {}).get('body', '')
+
+    if not phone:
+        print("⚠️ process_single_message: No phone number found in message data")
+        return
+
+    try:
+        # Mark as read first (non-critical)
+        if message_id:
+            from whatsapp.sender import mark_as_read
+            await mark_as_read(message_id)
+
+        # Route to the main message processor
+        response = await process_message(
+            phone=phone,
+            name=name,
+            message=message,
+            message_type=message_type,
+            media_url=media_url
+        )
+
+        # Send the response back via WhatsApp
+        if response:
+            await send_whatsapp_message(phone, response)
+
+    except Exception as e:
+        print(f"❌ Error in process_single_message: {e}")
+        import traceback
+        traceback.print_exc()
+
+        # Try to send a friendly error message so the user isn't left hanging
+        try:
+            error_msg = (
+                "Sorry, I ran into a little trouble processing your message. "
+                "Please try again in a few seconds! 💪"
+            )
+            await send_whatsapp_message(phone, error_msg)
+        except Exception:
+            pass
+
+
+async def _get_media_url(media_id: str) -> str | None:
+    """
+    Fetches the download URL for a media item from Meta's WhatsApp API.
+    The webhook only gives us a media ID — we need to ask Meta for the actual URL.
+    """
+    import httpx
+
+    if not media_id or not settings.WHATSAPP_TOKEN:
+        return None
+
+    try:
+        url = f"{settings.WHATSAPP_API_URL}/{media_id}"
+        headers = {
+            "Authorization": f"Bearer {settings.WHATSAPP_TOKEN}"
+        }
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('url')
+            else:
+                print(f"⚠️ Failed to get media URL for {media_id}: {response.status_code}")
+                return None
+
+    except Exception as e:
+        print(f"⚠️ Error fetching media URL: {e}")
+        return None
+
+
+# ============================================================
 # MAIN MESSAGE PROCESSOR
 # ============================================================
 
 async def process_message(phone: str, name: str, message: str, message_type: str = 'text', media_url: str = None) -> str:
     """
     Entry point. All WhatsApp messages pass through here.
+    Called by process_single_message with unpacked data.
     """
     from database.students import get_or_create_student
     from ai.classifier import classify_intent
