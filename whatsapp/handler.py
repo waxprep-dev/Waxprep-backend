@@ -1,8 +1,11 @@
 """
-WhatsApp Message Handler — Brain-Powered Version
+WhatsApp Message Handler
 
-Every message goes through the AI Brain.
-No rigid command routing. Natural conversation.
+CRITICAL FIXES IN THIS VERSION:
+1. ADMIN ADMIN_MODE is intercepted BEFORE any other check
+   so it works even when admin is in student testing mode
+2. Groq is now the primary AI (updated model names)
+3. Context-aware fallback instead of generic loop message
 """
 
 import json
@@ -38,16 +41,7 @@ async def handle_whatsapp_webhook(request: Request):
 
 
 async def process_single_message(message_data: dict, context: dict):
-    """
-    Processes one WhatsApp message.
-    
-    The flow:
-    1. Who is this from?
-    2. Are they the admin?
-    3. Are they in the middle of onboarding?
-    4. Are they a registered student?
-    5. Pass to AI Brain
-    """
+    """Processes one incoming WhatsApp message."""
     from whatsapp.sender import send_whatsapp_message, mark_as_read
 
     message_id = message_data.get('id', '')
@@ -82,14 +76,42 @@ async def process_single_message(message_data: dict, context: dict):
     if not message_text:
         return
 
-    # Sanitize
     import re
     message_text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', message_text)[:2000]
 
-    print(f"📩 Processing message from: {phone} | Text: {message_text[:50]}")
+    print(f"📩 Processing message from: {phone} | Text: {message_text[:60]}")
 
     # ============================================================
-    # STEP 1: CHECK IF ADMIN
+    # STEP 1: ADMIN MODE ESCAPE — intercepts BEFORE any other check
+    # ADMIN ADMIN_MODE must ALWAYS work, even in student testing mode
+    # This is the fix for the mode switch bug
+    # ============================================================
+    msg_upper = message_text.strip().upper()
+
+    if msg_upper == 'ADMIN ADMIN_MODE':
+        from config.settings import settings as cfg
+        from helpers import normalize_phone
+
+        def normalize_for_compare(p):
+            return p.replace('+', '').replace(' ', '').replace('-', '')
+
+        admin_num = cfg.ADMIN_WHATSAPP or ''
+        if normalize_for_compare(phone) == normalize_for_compare(admin_num):
+            try:
+                from database.client import redis_client
+                redis_client.delete(f"admin_student_mode:{phone}")
+            except Exception:
+                pass
+            await send_whatsapp_message(
+                phone,
+                "🛠️ *Admin Mode restored.*\n\n"
+                "You're back as admin. Type *ADMIN HELP* for commands.\n\n"
+                "Type *ADMIN STUDENT_MODE* anytime to test as a student again."
+            )
+            return
+
+    # ============================================================
+    # STEP 2: CHECK IF ADMIN (respects student mode)
     # ============================================================
     from admin.dashboard import is_admin
 
@@ -98,7 +120,7 @@ async def process_single_message(message_data: dict, context: dict):
         return
 
     # ============================================================
-    # STEP 2: GET STUDENT + CONVERSATION
+    # STEP 3: GET STUDENT + CONVERSATION
     # ============================================================
     from features.wax_id import student_exists_in_platform
 
@@ -110,16 +132,14 @@ async def process_single_message(message_data: dict, context: dict):
     else:
         conversation = await _get_temp_conversation(phone)
 
-    # Store phone in conversation for tool use
     conversation['platform_user_id'] = phone
 
-    # Get state
     raw_state = conversation.get('conversation_state', {})
     state = json.loads(raw_state) if isinstance(raw_state, str) else (raw_state or {})
     awaiting = state.get('awaiting_response_for', '')
 
     # ============================================================
-    # STEP 3: ONBOARDING CHECK
+    # STEP 4: ONBOARDING CHECK
     # ============================================================
     if awaiting in ONBOARDING_STATES:
         from whatsapp.flows.onboarding import handle_onboarding_response
@@ -132,25 +152,13 @@ async def process_single_message(message_data: dict, context: dict):
         return
 
     # ============================================================
-    # STEP 4: EXAM MODE (strict — only answers allowed)
+    # STEP 5: EXAM MODE (strict — only A/B/C/D allowed)
     # ============================================================
     current_mode = conversation.get('current_mode', 'default')
 
     if current_mode == 'exam' or awaiting == 'exam_answer':
         await _handle_exam_answer(phone, student, conversation, message_text, state)
         return
-
-    # ============================================================
-    # STEP 5: SAVE MESSAGE TO HISTORY
-    # ============================================================
-    from database.conversations import save_message
-    await save_message(
-        conversation_id=conversation['id'],
-        student_id=student['id'],
-        platform='whatsapp',
-        role='user',
-        content=message_text
-    )
 
     # ============================================================
     # STEP 6: CHECK QUESTION LIMITS
@@ -163,14 +171,20 @@ async def process_single_message(message_data: dict, context: dict):
         return
 
     # ============================================================
-    # STEP 7: PASS TO AI BRAIN
-    # The AI handles everything naturally from here
+    # STEP 7: SAVE MESSAGE AND PASS TO AI BRAIN
     # ============================================================
-    from database.conversations import get_conversation_history
-    from ai.brain import process_message_with_ai
+    from database.conversations import save_message, get_conversation_history
+    await save_message(
+        conversation_id=conversation['id'],
+        student_id=student['id'],
+        platform='whatsapp',
+        role='user',
+        content=message_text
+    )
 
     history = await get_conversation_history(conversation['id'])
 
+    from ai.brain import process_message_with_ai
     response = await process_message_with_ai(
         message=message_text,
         student=student,
@@ -180,7 +194,6 @@ async def process_single_message(message_data: dict, context: dict):
 
     await send_whatsapp_message(phone, response)
 
-    # Save response
     await save_message(
         conversation_id=conversation['id'],
         student_id=student['id'],
@@ -189,52 +202,53 @@ async def process_single_message(message_data: dict, context: dict):
         content=response
     )
 
-    # Update streak
+    from database.students import increment_questions_today
+    await increment_questions_today(student['id'])
     await _update_streak(student)
 
     print(f"✅ Response sent to {phone}")
 
 
 async def _handle_admin_message(phone: str, message: str):
-    """Handles admin messages. Tries AI brain first, falls back to direct commands."""
+    """Handles admin messages. Tries direct commands first, then AI."""
     from whatsapp.sender import send_whatsapp_message
 
     msg_upper = message.strip().upper()
 
-    # Direct command pattern — always works, no AI needed
+    # Direct ADMIN commands
     if msg_upper.startswith('ADMIN '):
         try:
             from admin.dashboard import handle_admin_command
             await handle_admin_command(phone, message)
             return
         except Exception as e:
-            await send_whatsapp_message(phone, f"Admin command error: {str(e)[:100]}")
+            print(f"Admin command error: {e}")
+            await send_whatsapp_message(phone, f"Command error: {str(e)[:100]}\n\nType *ADMIN HELP* for commands.")
             return
 
-    # Natural language admin — try AI brain
+    # Natural language admin
     try:
         from ai.brain import process_admin_message
         response = await process_admin_message(message, phone)
         await send_whatsapp_message(phone, response)
     except Exception as e:
         print(f"Admin AI error: {e}")
-        # Show helpful fallback
+        context = ""
+        try:
+            from ai.brain import _get_admin_context
+            context = await _get_admin_context()
+        except Exception:
+            pass
+
         await send_whatsapp_message(
             phone,
-            "Hey! Quick admin tip:\n\n"
-            "You can ask me anything naturally, like:\n"
-            "• 'How many students do I have?'\n"
-            "• 'Send a message to all free users'\n"
-            "• 'Create a promo code'\n\n"
-            "Or use direct commands starting with ADMIN:\n"
-            "• ADMIN STATS\n"
-            "• ADMIN BROADCAST ALL [message]\n"
-            "• ADMIN CODE CREATE [code] trial 7 100\n\n"
-            "Type ADMIN HELP for the full list."
+            f"{context}\n\n"
+            f"Type *ADMIN HELP* for all commands, or *ADMIN STATS* for stats."
         )
 
+
 async def _handle_exam_answer(phone: str, student: dict, conversation: dict, message: str, state: dict):
-    """Handles answers during exam mode."""
+    """Handles student answers during mock exam."""
     from whatsapp.sender import send_whatsapp_message
 
     if any(w in message.upper() for w in ['STOP', 'END', 'QUIT', 'EXIT']):
@@ -243,10 +257,10 @@ async def _handle_exam_answer(phone: str, student: dict, conversation: dict, mes
             'current_mode': 'default',
             'conversation_state': {},
         })
+        name = student.get('name', 'Student').split()[0]
         await send_whatsapp_message(
             phone,
-            f"Exam ended. Good job for practicing!\n\n"
-            "Type anything to continue studying."
+            f"Exam ended, {name}. Good practice! 💪\n\nAsk me anything to continue studying."
         )
         return
 
@@ -254,8 +268,7 @@ async def _handle_exam_answer(phone: str, student: dict, conversation: dict, mes
     if answer not in ['A', 'B', 'C', 'D']:
         await send_whatsapp_message(
             phone,
-            "During the exam, reply with *A*, *B*, *C*, or *D* only.\n\n"
-            "_(Type STOP to end the exam)_"
+            "During the exam, reply with *A*, *B*, *C*, or *D* only.\n_(Type STOP to end)_"
         )
         return
 
@@ -265,7 +278,6 @@ async def _handle_exam_answer(phone: str, student: dict, conversation: dict, mes
     answers = state.get('answers', {})
     correct_count = state.get('correct_count', 0)
 
-    # Get current question
     current_q = None
     if current_idx < len(questions):
         current_q = questions[current_idx]
@@ -274,21 +286,23 @@ async def _handle_exam_answer(phone: str, student: dict, conversation: dict, mes
         q_result = supabase.table('questions').select('*').eq('id', question_ids[current_idx]).execute()
         current_q = q_result.data[0] if q_result.data else None
 
+    total = len(question_ids or questions)
+
     if not current_q:
-        await _complete_exam(phone, student, conversation, state, correct_count, len(question_ids or questions))
+        await _complete_exam(phone, student, conversation, state, correct_count, total)
         return
 
     correct = current_q.get('correct_answer', 'A').upper()
     is_correct = answer == correct
-
-    answers[str(current_idx)] = {'answer': answer, 'correct': correct, 'is_correct': is_correct,
-                                   'subject': current_q.get('subject', '')}
+    answers[str(current_idx)] = {
+        'answer': answer, 'correct': correct,
+        'is_correct': is_correct, 'subject': current_q.get('subject', '')
+    }
 
     if is_correct:
         correct_count += 1
 
     next_idx = current_idx + 1
-    total = len(question_ids or questions)
 
     if next_idx >= total:
         state['answers'] = answers
@@ -296,7 +310,6 @@ async def _handle_exam_answer(phone: str, student: dict, conversation: dict, mes
         await _complete_exam(phone, student, conversation, state, correct_count, total)
         return
 
-    # Next question
     next_q = None
     if next_idx < len(questions):
         next_q = questions[next_idx]
@@ -319,31 +332,26 @@ async def _handle_exam_answer(phone: str, student: dict, conversation: dict, mes
         from database.students import increment_questions_today
         await increment_questions_today(student['id'])
 
-        q_text = next_q.get('question_text', '')
-        a = next_q.get('option_a', '')
-        b = next_q.get('option_b', '')
-        c = next_q.get('option_c', '')
-        d = next_q.get('option_d', '')
-
         await send_whatsapp_message(
             phone,
             f"*[{next_idx + 1}/{total}]* _{next_q.get('subject', '')}_\n\n"
-            f"{q_text}\n\n"
-            f"A. {a}\nB. {b}\nC. {c}\nD. {d}"
+            f"{next_q.get('question_text', '')}\n\n"
+            f"A. {next_q.get('option_a', '')}\n"
+            f"B. {next_q.get('option_b', '')}\n"
+            f"C. {next_q.get('option_c', '')}\n"
+            f"D. {next_q.get('option_d', '')}"
         )
     else:
         await _complete_exam(phone, student, conversation, state, correct_count, total)
 
 
 async def _complete_exam(phone: str, student: dict, conversation: dict, state: dict, correct: int, total: int):
-    """Completes an exam and shows results."""
+    """Ends exam and shows results."""
     from whatsapp.sender import send_whatsapp_message
     from database.conversations import update_conversation_state
-    from database.client import supabase
     from helpers import nigeria_now
 
     pct = round((correct / total * 100) if total > 0 else 0)
-    jamb_equiv = round((correct / total) * 400) if total > 0 else 0
 
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {
         'current_mode': 'default',
@@ -351,42 +359,36 @@ async def _complete_exam(phone: str, student: dict, conversation: dict, state: d
     })
 
     name = student.get('name', 'Student').split()[0]
+    target_exam = student.get('target_exam', 'JAMB')
 
-    result_msg = (
-        f"📝 *Exam Complete, {name}!*\n\n"
-        f"Score: *{correct}/{total}* ({pct}%)\n"
-    )
+    msg = f"📝 *Exam Complete, {name}!*\n\nScore: *{correct}/{total}* ({pct}%)\n"
 
     if total >= 40:
-        result_msg += f"JAMB equivalent: *{jamb_equiv}/400*\n"
+        jamb_equiv = round((correct / total) * 400)
+        msg += f"JAMB equivalent: *{jamb_equiv}/400*\n"
 
-    result_msg += "\n"
-
+    msg += "\n"
     if pct >= 80:
-        result_msg += "Outstanding performance! 🏆 You're exam-ready.\n\n"
+        msg += "Outstanding! You're ready for the real thing. 🏆"
     elif pct >= 60:
-        result_msg += "Good work! A few more sessions and you'll be flying. 💪\n\n"
+        msg += "Good work! A bit more practice and you'll be there. 💪"
     else:
-        result_msg += "Keep going — every exam you practice makes you stronger. 🔥\n\n"
+        msg += "Keep going — every practice session makes you stronger. 🔥"
 
-    result_msg += "Ask me anything to continue studying."
+    msg += "\n\nAsk me anything to continue studying."
+    await send_whatsapp_message(phone, msg)
 
-    await send_whatsapp_message(phone, result_msg)
-
-    # Update exam record
     exam_id = state.get('exam_id')
     if exam_id:
         try:
+            from database.client import supabase
             supabase.table('mock_exams').update({
-                'score': correct,
-                'percentage': pct,
-                'status': 'completed',
-                'completed_at': nigeria_now().isoformat(),
+                'score': correct, 'percentage': pct,
+                'status': 'completed', 'completed_at': nigeria_now().isoformat(),
             }).eq('id', exam_id).execute()
         except Exception:
             pass
 
-    # Award badge
     await award_badge(student['id'], 'MOCK_FIRST')
 
 
@@ -395,9 +397,8 @@ async def _handle_image(phone: str, message_data: dict):
     from features.wax_id import student_exists_in_platform
 
     student = await student_exists_in_platform('whatsapp', phone)
-
     if not student:
-        await send_whatsapp_message(phone, "Send me a message to get started first!")
+        await send_whatsapp_message(phone, "Send a message to get started first!")
         return
 
     from database.students import get_student_subscription_status
@@ -406,8 +407,9 @@ async def _handle_image(phone: str, message_data: dict):
     if status['effective_tier'] == 'free' and not status['is_trial']:
         await send_whatsapp_message(
             phone,
-            "Image analysis is available on Scholar Plan! 📸\n\n"
-            "Just say 'how do I subscribe?' and I'll help you get set up."
+            "📸 Image analysis is a Scholar Plan feature!\n\n"
+            "Upgrade to Scholar (₦1,500/month) to send photos of textbooks and notes.\n\n"
+            "Just ask me 'how do I subscribe?' and I'll help."
         )
         return
 
@@ -417,17 +419,21 @@ async def _handle_image(phone: str, message_data: dict):
     if not image_id:
         return
 
-    await send_whatsapp_message(phone, "📸 Analyzing your image... _(~10 seconds)_")
+    await send_whatsapp_message(phone, "📸 Got your image! Analyzing... _(~15 seconds)_ 🔍")
 
     try:
         from ai.openai_client import download_whatsapp_image, analyze_image
         image_b64 = await download_whatsapp_image(image_id)
 
         if not image_b64:
-            await send_whatsapp_message(phone, "I couldn't read that image. Try sending it again, or type your question.")
+            await send_whatsapp_message(
+                phone,
+                "❌ Couldn't download that image. Please try sending it again.\n\n"
+                "Or type your question and I'll answer immediately!"
+            )
             return
 
-        prompt = f"Student question: {caption}" if caption else None
+        prompt = f"Student asks: {caption}" if caption else None
         response = await analyze_image(image_base64=image_b64, prompt=prompt, student=student)
         await send_whatsapp_message(phone, response)
 
@@ -436,7 +442,10 @@ async def _handle_image(phone: str, message_data: dict):
 
     except Exception as e:
         print(f"Image error: {e}")
-        await send_whatsapp_message(phone, "Couldn't process that image. Please try again or type your question.")
+        await send_whatsapp_message(
+            phone,
+            "❌ Image analysis failed right now. Please try again, or type your question."
+        )
 
 
 async def _handle_voice(phone: str, message_data: dict):
@@ -444,7 +453,6 @@ async def _handle_voice(phone: str, message_data: dict):
     from features.wax_id import student_exists_in_platform
 
     student = await student_exists_in_platform('whatsapp', phone)
-
     if not student:
         await send_whatsapp_message(phone, "Send a message to get started first!")
         return
@@ -460,10 +468,14 @@ async def _handle_voice(phone: str, message_data: dict):
         transcribed = await transcribe_voice_note(audio_id)
 
         if not transcribed:
-            await send_whatsapp_message(phone, "Couldn't understand that. Please type your question.")
+            await send_whatsapp_message(
+                phone,
+                "❌ Couldn't understand that voice note.\n\n"
+                "Please speak clearly, or type your question."
+            )
             return
 
-        await send_whatsapp_message(phone, f"🎙️ I heard: _{transcribed}_\n\nLet me help with that...")
+        await send_whatsapp_message(phone, f"🎙️ I heard: _{transcribed}_\n\nLet me help...")
 
         fake_data = {'id': audio_id, 'from': phone, 'type': 'text', 'text': {'body': transcribed}}
         await process_single_message(fake_data, {})
@@ -534,23 +546,20 @@ def _normalize(phone: str) -> str:
 
 async def award_badge(student_id: str, badge_code: str) -> dict | None:
     from database.client import supabase
-
     try:
         badge = supabase.table('badges').select('*').eq('badge_code', badge_code).execute()
         if not badge.data:
             return None
-
         b = badge.data[0]
         existing = supabase.table('student_badges').select('id')\
             .eq('student_id', student_id).eq('badge_id', b['id']).execute()
-
         if existing.data:
             return None
-
         supabase.table('student_badges').insert({'student_id': student_id, 'badge_id': b['id']}).execute()
-        supabase.rpc('add_points_to_student', {'student_id_param': student_id, 'points_to_add': b.get('points_awarded', 50)}).execute()
+        supabase.rpc('add_points_to_student', {
+            'student_id_param': student_id, 'points_to_add': b.get('points_awarded', 50)
+        }).execute()
         return b
-
     except Exception:
         return None
 
@@ -581,3 +590,24 @@ async def _update_streak(student: dict):
 
     if new_streak in {7, 14, 30, 60, 100}:
         await award_badge(student['id'], f'STREAK_{new_streak}')
+
+        milestone_msgs = {
+            7: "🔥 7-day streak! You're building a real habit now.",
+            14: "⚡ 14 days straight! Top 20% by consistency.",
+            30: "💫 ONE MONTH! Monthly Master badge earned. 🏆",
+            60: "💎 60 days! Diamond Dedication achieved.",
+            100: "👑 100 DAYS! You're a legend.",
+        }
+
+        if new_streak in milestone_msgs:
+            try:
+                from database.client import supabase
+                from whatsapp.sender import send_whatsapp_message
+                phone_r = supabase.table('platform_sessions').select('platform_user_id')\
+                    .eq('student_id', student['id']).eq('platform', 'whatsapp').execute()
+                if phone_r.data:
+                    name = student.get('name', 'Student').split()[0]
+                    msg = milestone_msgs[new_streak].replace('!', f', {name}!', 1)
+                    await send_whatsapp_message(phone_r.data[0]['platform_user_id'], msg)
+            except Exception:
+                pass
