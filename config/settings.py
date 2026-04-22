@@ -5,35 +5,27 @@ load_dotenv()
 
 
 class Settings:
-
     APP_NAME = "WaxPrep"
     APP_VERSION = "1.0.0"
     ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
     SECRET_KEY = os.getenv("SECRET_KEY", "waxprep-change-this")
-
     ADMIN_WHATSAPP = os.getenv("ADMIN_WHATSAPP")
     TIMEZONE = "Africa/Lagos"
 
     SUPABASE_URL = os.getenv("SUPABASE_URL")
     SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-
     REDIS_URL = os.getenv("REDIS_URL")
 
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-    # ============================================================
-    # UPDATED MODEL NAMES — both old models were decommissioned
-    # llama3-8b-8192 → DEAD (causes the loop you're seeing)
-    # llama3-70b-8192 → DEAD
-    # These are the current working Groq models as of April 2026
-    # ============================================================
-    GROQ_FAST_MODEL = "llama-3.1-8b-instant"        # Fast, free, working
-    GROQ_SMART_MODEL = "llama-3.3-70b-versatile"    # Smart, free, working
-    GEMINI_MODEL = "gemini-2.0-flash"                # Working, 1500/day free
-    GEMINI_PRO_MODEL = "gemini-1.5-pro"              # For complex tasks only
-    OPENAI_VISION_MODEL = "gpt-4o-mini"              # For image analysis
+    # Current working models as of April 2026
+    GROQ_FAST_MODEL = "llama-3.1-8b-instant"
+    GROQ_SMART_MODEL = "llama-3.3-70b-versatile"
+    GEMINI_MODEL = "gemini-2.0-flash"
+    GEMINI_PRO_MODEL = "gemini-1.5-pro"
+    OPENAI_VISION_MODEL = "gpt-4o-mini"
 
     WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
     WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "waxprep_verify_2024")
@@ -74,7 +66,6 @@ class Settings:
     POINTS_BADGE_EARNED = 50
     POINTS_REFERRAL_SIGNUP = 100
 
-    # Reduced daily budget since Groq is now primary (free)
     DAILY_AI_BUDGET_USD = 2.00
     AI_BUDGET_WARNING_THRESHOLD = 0.70
     AI_BUDGET_SHIFT_THRESHOLD = 0.85
@@ -85,8 +76,6 @@ class Settings:
     LEVEL_THRESHOLDS = {
         1: 0, 2: 500, 3: 1200, 4: 2500, 5: 4500,
         6: 7000, 7: 10000, 8: 14000, 9: 19000, 10: 25000,
-        11: 32000, 12: 40000, 13: 50000, 14: 62000, 15: 76000,
-        16: 92000, 17: 110000, 18: 130000, 19: 152000, 20: 176000,
     }
 
     @classmethod
