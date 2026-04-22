@@ -447,6 +447,64 @@ async def _handle_image(phone: str, message_data: dict):
             "❌ Image analysis failed right now. Please try again, or type your question."
         )
 
+async def _handle_voice(phone: str, message_data: dict):
+    from whatsapp.sender import send_whatsapp_message
+    from features.wax_id import student_exists_in_platform
+
+    student = await student_exists_in_platform('whatsapp', phone)
+    if not student:
+        await send_whatsapp_message(phone, "Send a message to get started first!")
+        return
+
+    audio_id = (message_data.get('audio', {}) or message_data.get('voice', {})).get('id')
+    if not audio_id:
+        return
+
+    await send_whatsapp_message(phone, "🎙️ Listening to your voice note...")
+
+    try:
+        from ai.openai_client import transcribe_voice_note
+        transcribed = await transcribe_voice_note(audio_id)
+
+        if not transcribed:
+            await send_whatsapp_message(
+                phone,
+                "❌ Couldn't understand that clearly.\n\nPlease type your question."
+            )
+            return
+
+        # Show what was heard, then process it through STUDENT brain only
+        # Never route voice transcriptions through admin — even if phone matches admin number
+        await send_whatsapp_message(phone, f"🎙️ I heard: _{transcribed}_\n\nLet me help...")
+
+        # Process as student message — bypass admin check entirely for voice
+        from database.conversations import get_or_create_conversation, get_conversation_history, save_message
+        from ai.brain import process_message_with_ai, get_student_deep_context
+
+        conversation = await get_or_create_conversation(student['id'], 'whatsapp', phone)
+        conversation['platform_user_id'] = phone
+        history = await get_conversation_history(conversation['id'])
+        deep_context = await get_student_deep_context(student)
+
+        response = await process_message_with_ai(
+            message=transcribed,
+            student=student,
+            conversation=conversation,
+            conversation_history=history
+        )
+
+        await send_whatsapp_message(phone, response)
+        await save_message(
+            conversation_id=conversation['id'],
+            student_id=student['id'],
+            platform='whatsapp',
+            role='assistant',
+            content=response
+        )
+
+    except Exception as e:
+        print(f"Voice error: {e}")
+        await send_whatsapp_message(phone, "Voice note failed. Please type your question.")
 
 async def _handle_voice(phone: str, message_data: dict):
     from whatsapp.sender import send_whatsapp_message
