@@ -24,16 +24,16 @@ class Settings:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
     # ============================================================
-    # THE FIX IS HERE — Updated model names
-    # gemini-2.0-flash is the current free model (replaces gemini-1.5-flash)
-    # gemini-2.0-flash-lite is even faster/cheaper for simple tasks
-    # gemini-1.5-pro still works for pro-level tasks
+    # UPDATED MODEL NAMES — both old models were decommissioned
+    # llama3-8b-8192 → DEAD (causes the loop you're seeing)
+    # llama3-70b-8192 → DEAD
+    # These are the current working Groq models as of April 2026
     # ============================================================
-    GROQ_FAST_MODEL = "llama3-8b-8192"
-    GROQ_SMART_MODEL = "llama3-70b-8192"
-    GEMINI_MODEL = "gemini-2.0-flash"
-    GEMINI_PRO_MODEL = "gemini-1.5-pro"
-    OPENAI_VISION_MODEL = "gpt-4o-mini"
+    GROQ_FAST_MODEL = "llama-3.1-8b-instant"        # Fast, free, working
+    GROQ_SMART_MODEL = "llama-3.3-70b-versatile"    # Smart, free, working
+    GEMINI_MODEL = "gemini-2.0-flash"                # Working, 1500/day free
+    GEMINI_PRO_MODEL = "gemini-1.5-pro"              # For complex tasks only
+    OPENAI_VISION_MODEL = "gpt-4o-mini"              # For image analysis
 
     WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
     WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "waxprep_verify_2024")
@@ -74,7 +74,8 @@ class Settings:
     POINTS_BADGE_EARNED = 50
     POINTS_REFERRAL_SIGNUP = 100
 
-    DAILY_AI_BUDGET_USD = 3.00
+    # Reduced daily budget since Groq is now primary (free)
+    DAILY_AI_BUDGET_USD = 2.00
     AI_BUDGET_WARNING_THRESHOLD = 0.70
     AI_BUDGET_SHIFT_THRESHOLD = 0.85
 
