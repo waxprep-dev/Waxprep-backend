@@ -1,16 +1,66 @@
 """
-WaxPrep AI Brain
+WaxPrep AI Brain — Groq-Primary Architecture
 
-Every student message comes here.
-Gemini reads it, understands it, responds naturally.
-No commands. No menus. Just conversation.
+WHY GROQ IS NOW PRIMARY:
+- Groq free tier: ~14,400 requests per day (very generous)
+- Gemini free tier: 1,500 requests per day (exhausted quickly)
+- During testing we hit Gemini's limit and both AI models failed
+- Solution: Groq handles all conversations, Gemini handles complex tasks
+
+ARCHITECTURE:
+1. Every student message → Groq (fast, reliable, generous quota)
+2. Quiz question generation → Groq (can do it, free)
+3. Complex multi-topic explanations → Gemini (used sparingly)
+4. Daily challenge generation → Gemini (once per day, fine)
+5. Rate limit caching: if Gemini is rate limited, cache that for 60s
+
+ADMIN ESCAPE:
+ADMIN ADMIN_MODE always works even in student mode.
+This is intercepted at the handler level before any mode check.
 """
 
-import json
+from groq import Groq
 import google.generativeai as genai
 from config.settings import settings
 
-genai.configure(api_key=settings.GEMINI_API_KEY)
+# Initialize clients
+_groq_client = None
+_gemini_configured = False
+
+
+def get_groq_client() -> Groq:
+    """Returns the Groq client, creating it once."""
+    global _groq_client
+    if _groq_client is None:
+        _groq_client = Groq(api_key=settings.GROQ_API_KEY)
+    return _groq_client
+
+
+def setup_gemini():
+    """Configures Gemini API once."""
+    global _gemini_configured
+    if not _gemini_configured and settings.GEMINI_API_KEY:
+        genai.configure(api_key=settings.GEMINI_API_KEY)
+        _gemini_configured = True
+
+
+def is_gemini_rate_limited() -> bool:
+    """Checks if Gemini is currently rate limited (cached in Redis)."""
+    try:
+        from database.client import redis_client
+        return redis_client.get("gemini_rate_limited") is not None
+    except Exception:
+        return False
+
+
+def mark_gemini_rate_limited(seconds: int = 65):
+    """Marks Gemini as rate limited for the specified seconds."""
+    try:
+        from database.client import redis_client
+        redis_client.setex("gemini_rate_limited", seconds, "1")
+        print(f"⏳ Gemini rate limited, cached for {seconds}s")
+    except Exception:
+        pass
 
 
 async def process_message_with_ai(
@@ -20,82 +70,189 @@ async def process_message_with_ai(
     conversation_history: list
 ) -> str:
     """
-    Main function. Every student message comes here.
-    Uses Gemini to understand and respond naturally.
-    Falls back to Groq if Gemini fails.
+    Main brain function. Every student message comes here.
+
+    Primary: Groq (fast, free, 14,400 req/day)
+    Secondary: Gemini (smarter but 1,500 req/day limit)
+
+    Strategy:
+    - Use Groq for all conversations
+    - Groq with a smart system prompt handles 95% of cases well
+    - Gemini only for complex scientific explanations when explicitly needed
     """
-    student_context = _build_student_context(student, conversation)
-    system_prompt = _build_system_prompt(student, student_context)
+    system_prompt = _build_full_system_prompt(student, conversation)
 
-    history = []
+    # Format history for Groq
+    messages = [{"role": "system", "content": system_prompt}]
     for msg in conversation_history[-10:]:
-        role = "user" if msg.get("role") == "user" else "model"
-        history.append({
-            "role": role,
-            "parts": [{"text": msg.get("content", "")}]
-        })
+        role = msg.get("role", "user")
+        if role not in ["user", "assistant"]:
+            role = "user"
+        messages.append({"role": role, "content": msg.get("content", "")})
+    messages.append({"role": "user", "content": message})
 
+    # Try Groq first (primary)
     try:
-        model = genai.GenerativeModel(
-            model_name=settings.GEMINI_MODEL,
-            system_instruction=system_prompt,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.8,
-                max_output_tokens=1200,
+        client = get_groq_client()
+        response = client.chat.completions.create(
+            model=settings.GROQ_SMART_MODEL,
+            messages=messages,
+            max_tokens=1000,
+            temperature=0.75,
+        )
+        result = response.choices[0].message.content
+        if result and len(result.strip()) > 5:
+            return result.strip()
+    except Exception as e:
+        print(f"Groq primary error: {e}")
+
+    # Groq failed — try Gemini
+    if not is_gemini_rate_limited():
+        try:
+            setup_gemini()
+            model = genai.GenerativeModel(
+                model_name=settings.GEMINI_MODEL,
+                system_instruction=system_prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.8,
+                    max_output_tokens=1000,
+                )
             )
+
+            history = []
+            for msg in conversation_history[-8:]:
+                role = "user" if msg.get("role") == "user" else "model"
+                history.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
+
+            chat = model.start_chat(history=history)
+            response = chat.send_message(message)
+
+            text = ""
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, 'text') and part.text:
+                    text += part.text
+
+            if text.strip():
+                return text.strip()
+
+        except Exception as e:
+            error_str = str(e)
+            print(f"Gemini error: {error_str[:100]}")
+            if "429" in error_str or "quota" in error_str.lower() or "rate" in error_str.lower():
+                mark_gemini_rate_limited(65)
+
+    # Both failed — use fast Groq with simpler prompt
+    try:
+        client = get_groq_client()
+        name = student.get('name', 'Student').split()[0]
+        exam = student.get('target_exam', 'JAMB')
+        subjects = ', '.join(student.get('subjects', ['all subjects'])[:3])
+
+        simple_system = (
+            f"You are Wax, an AI tutor for {name} who is preparing for {exam}. "
+            f"Their subjects are {subjects}. "
+            f"Be warm, helpful, and use Nigerian examples (NEPA, danfo, suya, Lagos, etc.). "
+            f"Never give the same generic reply — actually respond to what they said."
         )
 
-        chat = model.start_chat(history=history)
-        response = chat.send_message(message)
-        result = _extract_text(response)
-
-        if result:
-            return result
-
-        return await _fallback_response(message, student, conversation_history)
+        response = client.chat.completions.create(
+            model=settings.GROQ_FAST_MODEL,
+            messages=[
+                {"role": "system", "content": simple_system},
+                {"role": "user", "content": message}
+            ],
+            max_tokens=600,
+            temperature=0.7,
+        )
+        return response.choices[0].message.content.strip()
 
     except Exception as e:
-        print(f"Gemini error: {e}")
-        return await _fallback_response(message, student, conversation_history)
+        print(f"Fast Groq also failed: {e}")
+
+    # Total failure — context-aware message instead of generic one
+    return _context_aware_fallback(message, student)
 
 
-def _extract_text(response) -> str:
-    """Extracts text from a Gemini response object."""
-    try:
-        text = ""
-        for part in response.candidates[0].content.parts:
-            if hasattr(part, 'text') and part.text:
-                text += part.text
-        return text.strip()
-    except Exception:
-        return ""
+def _context_aware_fallback(message: str, student: dict) -> str:
+    """
+    Returns a context-aware response even when all AI fails.
+    Never the same generic message — always responds to what was said.
+    """
+    name = student.get('name', 'Student').split()[0]
+    msg_lower = message.lower()
+    exam = student.get('target_exam', 'JAMB')
+    subjects = student.get('subjects', [])
+
+    if any(w in msg_lower for w in ['quiz', 'question', 'test', 'practice']):
+        subject = subjects[0] if subjects else 'Mathematics'
+        return (
+            f"I want to quiz you, {name}! Give me just a second — "
+            f"I'm putting together a {subject} question for you. 🎯\n\n"
+            f"_(My AI brain is a tiny bit overloaded right now — "
+            f"try again in 30 seconds and I'll have a question ready!)_"
+        )
+
+    if any(w in msg_lower for w in ['explain', 'what is', 'what are', 'how does', 'teach', 'help me with']):
+        return (
+            f"Great question, {name}! I'm thinking through the best way to explain this. 🤔\n\n"
+            f"I'm temporarily at my limit — try again in about 30 seconds "
+            f"and I'll give you a proper explanation. 💡"
+        )
+
+    if any(w in msg_lower for w in ['hi', 'hello', 'hey', 'good']):
+        streak = student.get('current_streak', 0)
+        answered = student.get('total_questions_answered', 0)
+        streak_msg = f"Your {streak}-day streak is still going! 🔥" if streak > 0 else ""
+        return (
+            f"Hey {name}! Great to see you. 😊\n\n"
+            f"{streak_msg}\n"
+            f"You've answered {answered:,} questions so far. "
+            f"What subject do you want to tackle today? "
+            f"Just tell me and we'll dive in."
+        )
+
+    if any(w in msg_lower for w in ['progress', 'stats', 'how am i', 'my score']):
+        answered = student.get('total_questions_answered', 0)
+        correct = student.get('total_questions_correct', 0)
+        accuracy = round((correct / answered * 100) if answered > 0 else 0)
+        streak = student.get('current_streak', 0)
+        return (
+            f"📊 *Quick Stats, {name}*\n\n"
+            f"Questions answered: {answered:,}\n"
+            f"Accuracy: {accuracy}%\n"
+            f"Streak: {streak} day{'s' if streak != 1 else ''}\n\n"
+            f"Keep going — every question gets you closer to {exam}! 💪"
+        )
+
+    # Generic but still personal
+    return (
+        f"I'm here, {name}! My processing is a bit slow right now. 😅\n\n"
+        f"Try asking me again in 30 seconds — I'll answer properly. "
+        f"What subject would you like to study?"
+    )
 
 
-def _build_student_context(student: dict, conversation: dict) -> str:
-    """Builds a summary of the student for the AI system prompt."""
+def _build_full_system_prompt(student: dict, conversation: dict) -> str:
+    """Builds the complete system prompt with student context."""
     from helpers import nigeria_today
 
-    name = student.get('name', 'Student')
-    wax_id = student.get('wax_id', '')
-    class_level = student.get('class_level', '')
-    target_exam = student.get('target_exam', '')
+    name = student.get('name', 'Student').split()[0]
+    class_level = student.get('class_level', 'SS3')
+    target_exam = student.get('target_exam', 'JAMB')
     subjects = student.get('subjects', [])
     exam_date = student.get('exam_date', '')
-    state = student.get('state', '')
+    state = student.get('state', 'Nigeria')
     streak = student.get('current_streak', 0)
-    points = student.get('total_points', 0)
     answered = student.get('total_questions_answered', 0)
     correct = student.get('total_questions_correct', 0)
     accuracy = round((correct / answered * 100) if answered > 0 else 0)
     tier = student.get('subscription_tier', 'free')
     is_trial = student.get('is_trial_active', False)
-    level = student.get('current_level', 1)
-    level_name = student.get('level_name', 'Scholar')
     language = student.get('language_preference', 'english')
-    current_subject = conversation.get('current_subject', '')
-    current_topic = conversation.get('current_topic', '')
     today = nigeria_today()
     studied_today = student.get('last_study_date', '') == today
+    current_subject = conversation.get('current_subject', '')
+    current_topic = conversation.get('current_topic', '')
 
     days_until_exam = ""
     if exam_date:
@@ -105,170 +262,122 @@ def _build_student_context(student: dict, conversation: dict) -> str:
             days_left = (exam_dt - datetime.now()).days
             if days_left > 0:
                 days_until_exam = f"{days_left} days until {target_exam}"
-            else:
-                days_until_exam = f"{target_exam} exam has passed"
         except Exception:
             pass
 
-    plan_str = 'Full Trial Access (all features unlocked)' if is_trial else tier.capitalize()
+    plan = "Full Trial (all features)" if is_trial else tier.capitalize()
+    subjects_str = ', '.join(subjects) if subjects else 'not specified'
 
-    return (
-        f"STUDENT: {name} | WAX ID: {wax_id}\n"
-        f"Class: {class_level} | Exam: {target_exam} | State: {state}\n"
-        f"Subjects: {', '.join(subjects)}\n"
-        f"Countdown: {days_until_exam}\n"
-        f"Plan: {plan_str}\n"
-        f"Stats: {answered} questions answered | {accuracy}% accuracy | "
-        f"{streak}-day streak | {points:,} points | Level {level} ({level_name})\n"
-        f"Studied today: {'Yes' if studied_today else 'No'}\n"
-        f"Currently on: {current_subject} - {current_topic}\n"
-        f"Language preference: {language}"
-    )
-
-
-def _build_system_prompt(student: dict, student_context: str) -> str:
-    """Builds the personality and instruction prompt for Wax."""
-    name = student.get('name', 'Student').split()[0]
-    target_exam = student.get('target_exam', 'JAMB')
-    language = student.get('language_preference', 'english')
-
-    language_note = ""
+    lang_note = ""
     if language == 'pidgin':
-        language_note = (
-            "\nLANGUAGE: Communicate naturally in Nigerian Pidgin English mixed with "
-            "standard English for technical terms. Sound like a friendly older sibling."
-        )
+        lang_note = "\nLANGUAGE: Respond in Nigerian Pidgin English naturally mixed with standard English for technical terms.\n"
 
     return (
-        f"You are Wax — the AI study companion inside WaxPrep, Nigeria's most advanced "
-        f"exam preparation platform.\n\n"
-        f"You are talking with {name}, preparing for {target_exam}.\n\n"
-        f"{student_context}\n\n"
-        f"YOUR CHARACTER:\n"
-        f"You are warm, intelligent, and genuinely invested in {name}'s success. "
-        f"You speak like a knowledgeable friend who has already passed these exams and wants to help. "
-        f"You are never robotic. You never list numbered options unless specifically asked. "
-        f"You take initiative like a real teacher.\n\n"
-        f"HOW YOU RESPOND:\n"
-        f"When asked about any subject topic: explain it thoroughly with at least one Nigerian "
-        f"real-life example (NEPA for electricity, danfo for Newton's laws, egusi for osmosis, "
-        f"palm oil for chemistry, suya for fractions, Lagos traffic for speed and distance).\n"
-        f"When asked to quiz or test: generate a well-formed multiple choice question with 4 options.\n"
-        f"When asked about progress/stats: share the numbers from the student context warmly.\n"
-        f"When asked about subscription/payment: explain the Scholar plan is N1,500/month and "
-        f"they can type ADMIN PAY or visit waxprep.ng to subscribe (be honest, payment link "
-        f"generation is being set up).\n"
-        f"When the student seems stressed: acknowledge it first, then gently redirect to studying.\n"
-        f"When the student says something vague like 'hi' or 'hello': greet them warmly, "
-        f"reference something personal from their profile (streak, exam countdown), and "
-        f"proactively suggest what to study based on their subjects.\n\n"
+        f"You are Wax — the AI study companion inside WaxPrep, Nigeria's most advanced exam prep platform.\n\n"
+
+        f"STUDENT PROFILE:\n"
+        f"Name: {name} | Class: {class_level} | Exam: {target_exam}\n"
+        f"Subjects: {subjects_str}\n"
+        f"State: {state} | Plan: {plan}\n"
+        f"Exam countdown: {days_until_exam}\n\n"
+
+        f"THEIR PERFORMANCE:\n"
+        f"Questions answered: {answered:,} | Accuracy: {accuracy}%\n"
+        f"Current streak: {streak} days | Studied today: {'Yes' if studied_today else 'No'}\n"
+        f"Currently on: {current_subject} - {current_topic}\n\n"
+
+        f"YOUR PERSONALITY:\n"
+        f"You are warm, smart, and genuinely care about {name} passing their exam. "
+        f"You sound like a knowledgeable older sibling who has already passed {target_exam} "
+        f"and wants to share everything they know. Never robotic. Never give numbered menus "
+        f"unless asked. Take initiative like a real teacher.\n\n"
+
+        f"HOW YOU TEACH:\n"
+        f"For every concept you explain, use at least ONE Nigerian example:\n"
+        f"- Physics: NEPA/PHCN, danfo bus braking suddenly, generators, Lagos road\n"
+        f"- Chemistry: Palm oil production, water purification (Naija water problems), fuel\n"
+        f"- Biology: Udala tree, egusi seeds swelling, cassava processing, malaria (every Nigerian knows it)\n"
+        f"- Maths: Sharing suya equally, market price calculations, land measurement\n"
+        f"- Economics: Naira exchange rate, Alaba market pricing, petrol scarcity\n"
+        f"- Government: INEC, state governors, LGAs, NASS\n"
+        f"- Literature: Achebe, Soyinka, Emecheta — every SS student knows these\n\n"
+
+        f"WHEN STUDENT ASKS FOR A QUIZ:\n"
+        f"Generate a proper multiple choice question in this exact format:\n"
+        f"❓ *Question* ⭐⭐⭐\n"
+        f"_{subject} — {topic}_\n\n"
+        f"[Question text here]\n\n"
+        f"*A.* [Option A]\n"
+        f"*B.* [Option B]\n"
+        f"*C.* [Option C]\n"
+        f"*D.* [Option D]\n\n"
+        f"_Reply with A, B, C, or D_\n\n"
+        f"Then wait for their answer. When they answer, tell them if they're right, "
+        f"explain why with the Nigerian context, and offer another question.\n\n"
+
         f"WHAT YOU NEVER DO:\n"
-        f"Never say 'type X to do Y'. Just do it.\n"
-        f"Never give a numbered menu of options unless asked.\n"
-        f"Never say 'I am an AI' or break character.\n"
-        f"Never ignore context — always reference their exam, subjects, and progress.\n\n"
-        f"FORMAT FOR WHATSAPP:\n"
-        f"Use *bold* for key terms. Use line breaks between ideas. "
-        f"Keep responses focused — not too long. Use emojis warmly but sparingly.\n"
-        f"{language_note}"
+        f"- Never say the same thing twice in a row\n"
+        f"- Never say 'Type X to do Y'\n"
+        f"- Never ignore what they said — always respond TO their actual message\n"
+        f"- Never say 'I am an AI'\n"
+        f"- For inappropriate messages: gently redirect back to studies\n\n"
+
+        f"FORMAT:\n"
+        f"Use *bold* for key terms. Short paragraphs. Emojis sparingly. "
+        f"WhatsApp formatting only.\n"
+        f"{lang_note}"
     )
-
-
-async def _fallback_response(message: str, student: dict, history: list) -> str:
-    """Uses Groq as backup when Gemini fails."""
-    try:
-        from groq import Groq
-        from config.settings import settings
-
-        client = Groq(api_key=settings.GROQ_API_KEY)
-        name = student.get('name', 'Student').split()[0]
-        target_exam = student.get('target_exam', 'JAMB')
-
-        system = (
-            f"You are Wax, a friendly AI study tutor for Nigerian secondary school students. "
-            f"You are talking with {name} who is preparing for {target_exam}. "
-            f"Be warm, helpful, and use Nigerian examples. Respond naturally, not robotically."
-        )
-
-        messages = [{"role": "system", "content": system}]
-        for msg in history[-6:]:
-            messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
-        messages.append({"role": "user", "content": message})
-
-        response = client.chat.completions.create(
-            model=settings.GROQ_FAST_MODEL,
-            messages=messages,
-            max_tokens=800,
-            temperature=0.7,
-        )
-        return response.choices[0].message.content
-
-    except Exception as e:
-        print(f"Groq fallback error: {e}")
-        name = student.get('name', 'Student').split()[0]
-        return (
-            f"Hey {name}! I'm here. 😊\n\n"
-            f"What would you like to study? Just tell me the topic or subject "
-            f"and I'll explain it right away."
-        )
 
 
 async def process_admin_message(message: str, admin_phone: str) -> str:
     """
-    Handles admin messages with natural language understanding.
-    Falls back to direct command parsing if AI is unavailable.
+    Handles admin natural language messages.
+    Uses direct parsing first (always works), Groq for context.
     """
-    # First try direct command parsing (always works, no AI needed)
-    direct_result = await _handle_admin_direct(message, admin_phone)
-    if direct_result:
-        return direct_result
+    # Try direct keyword parsing first
+    direct = await _handle_admin_direct(message)
+    if direct:
+        return direct
 
-    # Try Gemini for natural language admin queries
+    # Try Groq for natural language admin queries
     try:
         context = await _get_admin_context()
+        client = get_groq_client()
 
-        system = (
-            "You are the WaxPrep admin assistant helping the founder manage the platform.\n"
-            "Be concise and action-oriented. The admin is busy.\n\n"
-            f"Current platform status:\n{context}\n\n"
-            "You can answer questions about the platform stats from the context above. "
-            "For actions like broadcasts, upgrades, or bans, tell the admin to use "
-            "the specific ADMIN command and show them the exact syntax."
+        response = client.chat.completions.create(
+            model=settings.GROQ_FAST_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the WaxPrep admin assistant. Help the founder manage the platform. "
+                        "Be concise. Current stats: " + context
+                    )
+                },
+                {"role": "user", "content": message}
+            ],
+            max_tokens=500,
+            temperature=0.5,
         )
 
-        model = genai.GenerativeModel(
-            model_name=settings.GEMINI_MODEL,
-            system_instruction=system,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.5,
-                max_output_tokens=600,
-            )
-        )
-
-        response = model.generate_content(message)
-        result = _extract_text(response)
+        result = response.choices[0].message.content.strip()
         if result:
             return result
 
     except Exception as e:
-        print(f"Admin Gemini error: {e}")
+        print(f"Admin Groq error: {e}")
 
-    return await _admin_fallback(message, admin_phone)
+    return await _admin_fallback(message)
 
 
-async def _handle_admin_direct(message: str, phone: str) -> str | None:
-    """
-    Handles admin requests directly without AI.
-    Returns a response string if handled, None if not recognized.
-    """
-    msg = message.strip().lower()
+async def _handle_admin_direct(message: str) -> str | None:
+    """Direct keyword-based admin responses. No AI needed."""
+    msg = message.lower().strip()
 
-    # Stats requests
-    if any(w in msg for w in ['stats', 'how many student', 'how many user', 'numbers', 'overview']):
+    if any(w in msg for w in ['stats', 'how many student', 'how many user', 'overview', 'numbers']):
         return await _get_admin_context()
 
-    # Revenue requests
-    if any(w in msg for w in ['revenue', 'income', 'money', 'earnings', 'payment']):
+    if any(w in msg for w in ['revenue', 'income', 'money', 'earnings']):
         from database.client import supabase
         from helpers import nigeria_today
         from datetime import datetime, timedelta
@@ -286,48 +395,38 @@ async def _handle_admin_direct(message: str, phone: str) -> str | None:
         month_p = supabase.table('payments').select('amount_naira')\
             .gte('completed_at', month_ago).eq('status', 'completed').execute()
 
-        rev_today = sum(p.get('amount_naira', 0) for p in (today_p.data or []))
-        rev_week = sum(p.get('amount_naira', 0) for p in (week_p.data or []))
-        rev_month = sum(p.get('amount_naira', 0) for p in (month_p.data or []))
-
         return (
-            f"💰 *Revenue Summary*\n\n"
-            f"Today: ₦{rev_today:,}\n"
-            f"This Week: ₦{rev_week:,}\n"
-            f"This Month: ₦{rev_month:,}"
+            f"💰 *Revenue*\n\n"
+            f"Today: ₦{sum(p.get('amount_naira',0) for p in (today_p.data or [])):,}\n"
+            f"This week: ₦{sum(p.get('amount_naira',0) for p in (week_p.data or [])):,}\n"
+            f"This month: ₦{sum(p.get('amount_naira',0) for p in (month_p.data or [])):,}"
         )
 
-    # Report request
-    if any(w in msg for w in ['report', 'send report', 'daily report']):
+    if 'report' in msg and any(w in msg for w in ['send', 'generate', 'give me']):
         from utils.scheduler import send_daily_admin_report
         await send_daily_admin_report()
-        return "✅ Daily report sent to your WhatsApp!"
+        return "✅ Daily report sent!"
 
-    # Challenge generation
-    if 'challenge' in msg and any(w in msg for w in ['generate', 'create', 'make', 'new']):
+    if 'challenge' in msg and any(w in msg for w in ['generate', 'create', 'new', 'make']):
         from utils.scheduler import generate_daily_challenge
         await generate_daily_challenge()
         return "✅ Daily challenge generated!"
 
-    # Top students
-    if 'top' in msg and any(w in msg for w in ['student', 'user', 'performer']):
+    if any(w in msg for w in ['top student', 'top user', 'best student', 'leaderboard']):
         from database.client import supabase
         result = supabase.table('students').select(
-            'name, wax_id, total_points, current_streak, subscription_tier'
+            'name, wax_id, total_points, current_streak'
         ).eq('is_active', True).order('total_points', desc=True).limit(5).execute()
 
         if not result.data:
             return "No students yet!"
 
         medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣']
-        lines = [f"🏆 *Top Students*\n"]
+        lines = ["🏆 *Top Students*\n"]
         for i, s in enumerate(result.data):
-            medal = medals[i] if i < len(medals) else '•'
             lines.append(
-                f"{medal} {s['name']}\n"
-                f"   {s.get('wax_id', '')} | "
-                f"{s.get('total_points', 0):,} pts | "
-                f"{s.get('current_streak', 0)}🔥"
+                f"{medals[i] if i < 5 else '•'} {s['name']}\n"
+                f"   {s.get('wax_id','')} | {s.get('total_points',0):,}pts | {s.get('current_streak',0)}🔥"
             )
         return "\n\n".join(lines)
 
@@ -335,7 +434,7 @@ async def _handle_admin_direct(message: str, phone: str) -> str | None:
 
 
 async def _get_admin_context() -> str:
-    """Gets current platform stats for admin."""
+    """Current platform stats for admin."""
     from database.client import supabase, redis_client
     from helpers import nigeria_today
     from config.settings import settings
@@ -347,65 +446,58 @@ async def _get_admin_context() -> str:
 
     try:
         total = supabase.table('students').select('id', count='exact').execute()
-        active_today = supabase.table('students').select('id', count='exact')\
+        active = supabase.table('students').select('id', count='exact')\
             .eq('last_study_date', today).execute()
-        new_today = supabase.table('students').select('id', count='exact')\
+        new_t = supabase.table('students').select('id', count='exact')\
             .gte('created_at', today).execute()
         paying = supabase.table('students').select('id', count='exact')\
             .neq('subscription_tier', 'free').execute()
-        on_trial = supabase.table('students').select('id', count='exact')\
+        trial = supabase.table('students').select('id', count='exact')\
             .eq('is_trial_active', True).execute()
 
         payments = supabase.table('payments').select('amount_naira')\
             .gte('completed_at', today).eq('status', 'completed').execute()
-        revenue_today = sum(p.get('amount_naira', 0) for p in (payments.data or []))
+        revenue = sum(p.get('amount_naira', 0) for p in (payments.data or []))
 
         ai_cost = float(redis_client.get(f"ai_cost:{today}") or 0)
-
         q_count = supabase.table('questions').select('id', count='exact').execute()
 
         return (
-            f"📊 *WaxPrep Stats — {now.strftime('%d %b %Y, %H:%M')} WAT*\n\n"
-            f"👥 *Students*\n"
-            f"Total: {total.count or 0:,}\n"
-            f"New Today: +{new_today.count or 0}\n"
-            f"Studying Today: {active_today.count or 0:,}\n"
-            f"On Trial: {on_trial.count or 0:,}\n"
+            f"📊 *WaxPrep — {now.strftime('%H:%M %d %b')}*\n\n"
+            f"Total students: {total.count or 0:,}\n"
+            f"New today: +{new_t.count or 0}\n"
+            f"Active today: {active.count or 0:,}\n"
+            f"On trial: {trial.count or 0:,}\n"
             f"Paying: {paying.count or 0:,}\n\n"
-            f"💰 Revenue Today: ₦{revenue_today:,}\n"
-            f"🤖 AI Cost Today: ${ai_cost:.4f} / ${settings.DAILY_AI_BUDGET_USD}\n"
-            f"📚 Questions in Bank: {q_count.count or 0:,}\n\n"
-            f"Type *ADMIN HELP* for all admin commands."
+            f"Revenue today: ₦{revenue:,}\n"
+            f"AI cost today: ${ai_cost:.4f} / ${settings.DAILY_AI_BUDGET_USD}\n"
+            f"Questions in bank: {q_count.count or 0:,}\n\n"
+            f"Gemini rate limited: {'Yes ⚠️' if is_gemini_rate_limited() else 'No ✅'}"
         )
-
     except Exception as e:
-        return f"Stats error: {str(e)[:100]}"
+        return f"Could not load stats: {str(e)[:50]}"
 
 
-async def _admin_fallback(message: str, phone: str) -> str:
-    """Final fallback for admin when everything else fails."""
-    msg = message.strip().lower()
+async def _admin_fallback(message: str) -> str:
+    """Last resort admin response."""
+    msg = message.lower()
 
-    # Try to be helpful based on keywords
-    if any(w in msg for w in ['help', 'what can', 'commands', 'options']):
+    if any(w in msg for w in ['help', 'what can', 'commands']):
         return (
-            "🛠️ *Admin Quick Reference*\n\n"
-            "Just ask naturally:\n"
+            "🛠️ *Admin Quick Commands*\n\n"
             "• 'How many students?' → stats\n"
             "• 'Revenue today?' → revenue\n"
             "• 'Top students' → leaderboard\n"
-            "• 'Send report' → daily report\n\n"
-            "Or use ADMIN commands:\n"
+            "• 'Send report' → daily report now\n\n"
             "*ADMIN STATS* — full stats\n"
-            "*ADMIN BROADCAST ALL [msg]* — message all\n"
-            "*ADMIN STUDENT WAX-XXXXXX* — student profile\n"
-            "*ADMIN UPGRADE WAX-XXXXXX scholar 30* — give plan\n"
-            "*ADMIN CODE CREATE WAX50 trial 7 100* — promo code\n"
-            "*ADMIN HELP* — complete command list"
+            "*ADMIN BROADCAST ALL [msg]* — message everyone\n"
+            "*ADMIN STUDENT_MODE* — test as student\n"
+            "*ADMIN HELP* — full command list"
         )
 
     return (
-        "I got your message but couldn't process it right now.\n\n"
-        "Try asking: 'How many students do I have?' or use *ADMIN STATS*\n\n"
-        "Type *ADMIN HELP* for all commands."
+        "Got it. Try:\n"
+        "• *ADMIN STATS* for stats\n"
+        "• *ADMIN HELP* for all commands\n\n"
+        "Or just ask naturally: 'How many students do I have?'"
     )
