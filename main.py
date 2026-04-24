@@ -1,17 +1,14 @@
 """
 WaxPrep Main Application
 
-The entry point for the entire WaxPrep backend.
-
-KEY FIX IN THIS VERSION:
-The WhatsApp webhook now reads the request body BEFORE starting the
-background task. Previously the body was passed as a stale Request object
-which caused silent failures. Now the body is parsed first, then passed
-as a plain dictionary to the background task. This is the fix for
-"messages come in but no replies are sent."
+FIXES IN THIS VERSION:
+- Admin API endpoints now require X-Admin-Key header
+- Payment webhook now checks for duplicate payments before processing
+- Paystack HMAC verification hardened — rejects requests with no secret key
+- Amount verification added to prevent plan manipulation
 """
 
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -20,34 +17,52 @@ from contextlib import asynccontextmanager
 from config.settings import settings
 
 
+def verify_admin_key(request: Request):
+    """
+    Dependency function that protects all admin API endpoints.
+    Checks for X-Admin-Key header against ADMIN_API_KEY setting.
+    Set ADMIN_API_KEY in your Railway environment variables.
+    """
+    if not settings.ADMIN_API_KEY:
+        # If no key is configured, block all access and warn
+        raise HTTPException(
+            status_code=503,
+            detail="Admin API not configured. Set ADMIN_API_KEY in environment variables."
+        )
+    api_key = request.headers.get("X-Admin-Key", "")
+    if not api_key or api_key != settings.ADMIN_API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized. Include a valid X-Admin-Key header."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown logic."""
-    print("🚀 WaxPrep is starting up...")
+    print("WaxPrep is starting up...")
 
-    # Test database connections
     try:
         from database.client import test_connections
         test_connections()
     except Exception as e:
-        print(f"❌ Database connection failed: {e}")
+        print(f"Database connection failed: {e}")
         raise
 
-    # Start the scheduler
     try:
         from utils.scheduler import start_scheduler
         start_scheduler()
-        print("✅ Scheduler started")
+        print("Scheduler started")
     except Exception as e:
-        print(f"⚠️ Scheduler failed to start: {e}")
+        print(f"Scheduler failed to start: {e}")
         import traceback
         traceback.print_exc()
 
-    print("✅ WaxPrep is ready to receive messages!")
+    print("WaxPrep is ready to receive messages!")
 
     yield
 
-    print("👋 WaxPrep is shutting down...")
+    print("WaxPrep is shutting down...")
     try:
         from utils.scheduler import stop_scheduler
         stop_scheduler()
@@ -71,17 +86,13 @@ app.add_middleware(
 )
 
 
-# ============================================================
-# HEALTH CHECK
-# ============================================================
-
 @app.get("/")
 async def root():
     return {
         "app": "WaxPrep",
         "version": settings.APP_VERSION,
         "status": "operational",
-        "message": "Nigeria's Most Advanced AI Educational Platform 🇳🇬"
+        "message": "Nigeria's Most Advanced AI Educational Platform"
     }
 
 
@@ -112,16 +123,9 @@ async def health_check():
     }
 
 
-# ============================================================
-# WHATSAPP WEBHOOK
-# ============================================================
-
 @app.get("/webhook/whatsapp")
 async def whatsapp_webhook_verify(request: Request):
-    """
-    WhatsApp webhook verification.
-    Meta calls this once when you set up the webhook in their dashboard.
-    """
+    """WhatsApp webhook verification."""
     params = dict(request.query_params)
 
     verify_token = params.get("hub.verify_token", "")
@@ -129,10 +133,10 @@ async def whatsapp_webhook_verify(request: Request):
     mode = params.get("hub.mode", "")
 
     if mode == "subscribe" and verify_token == settings.WHATSAPP_VERIFY_TOKEN:
-        print(f"✅ WhatsApp webhook verified successfully")
+        print(f"WhatsApp webhook verified successfully")
         return PlainTextResponse(content=challenge)
     else:
-        print(f"❌ WhatsApp webhook verification failed. Token: '{verify_token}' Expected: '{settings.WHATSAPP_VERIFY_TOKEN}'")
+        print(f"WhatsApp webhook verification failed. Token: '{verify_token}'")
         raise HTTPException(status_code=403, detail="Verification failed")
 
 
@@ -140,61 +144,44 @@ async def whatsapp_webhook_verify(request: Request):
 async def whatsapp_webhook_receive(request: Request, background_tasks: BackgroundTasks):
     """
     Receives all incoming WhatsApp messages.
-
-    CRITICAL: We read the request body HERE, synchronously, before
-    adding to background task. This is the fix for silent message failures.
-
-    The Request object's body stream can only be read ONCE.
-    If we pass the Request object to a background task, the body is
-    already consumed when the task tries to read it, causing silent failure.
-
-    Solution: Read and parse the body first. Pass the parsed dict.
+    Body is read synchronously before background task — this is the fix for silent failures.
     """
     try:
-        # READ THE BODY NOW — before it gets consumed
         body_bytes = await request.body()
-        
+
         if not body_bytes:
-            print("⚠️ Received empty webhook body")
+            print("Received empty webhook body")
             return JSONResponse(content={"status": "empty"}, status_code=200)
 
         import json
         try:
             body_data = json.loads(body_bytes)
         except json.JSONDecodeError as e:
-            print(f"⚠️ Invalid JSON in webhook: {e}")
+            print(f"Invalid JSON in webhook: {e}")
             return JSONResponse(content={"status": "invalid_json"}, status_code=200)
 
-        print(f"📨 Webhook received: {str(body_data)[:200]}")
+        print(f"Webhook received: {str(body_data)[:200]}")
 
-        # NOW add to background task — pass the parsed dict, not the request
         background_tasks.add_task(process_whatsapp_message_data, body_data)
 
-        # Return 200 immediately so WhatsApp doesn't retry
         return JSONResponse(content={"status": "received"}, status_code=200)
 
     except Exception as e:
-        print(f"❌ Webhook receive error: {e}")
+        print(f"Webhook receive error: {e}")
         import traceback
         traceback.print_exc()
-        # Always return 200 to WhatsApp even on error
-        # Otherwise WhatsApp will keep retrying
         return JSONResponse(content={"status": "error_logged"}, status_code=200)
 
 
 async def process_whatsapp_message_data(body_data: dict):
-    """
-    Background task that processes WhatsApp message data.
-    Called with already-parsed dictionary — no Request object needed.
-    All errors are caught and logged so they don't silently fail.
-    """
+    """Background task that processes WhatsApp message data."""
     try:
-        print(f"🔄 Processing webhook data...")
-        
+        print(f"Processing webhook data...")
+
         entries = body_data.get('entry', [])
-        
+
         if not entries:
-            print("⚠️ No entries in webhook data")
+            print("No entries in webhook data")
             return
 
         for entry in entries:
@@ -205,30 +192,26 @@ async def process_whatsapp_message_data(body_data: dict):
 
                 for message_data in messages:
                     try:
-                        print(f"📩 Processing message from: {message_data.get('from', 'unknown')}")
+                        print(f"Processing message from: {message_data.get('from', 'unknown')}")
                         from whatsapp.handler import process_single_message
                         await process_single_message(message_data, value)
-                        print(f"✅ Message processed successfully")
+                        print(f"Message processed successfully")
                     except Exception as e:
-                        print(f"❌ Error processing message: {e}")
+                        print(f"Error processing message: {e}")
                         import traceback
                         traceback.print_exc()
 
     except Exception as e:
-        print(f"❌ Background task error: {e}")
+        print(f"Background task error: {e}")
         import traceback
         traceback.print_exc()
 
-
-# ============================================================
-# PAYSTACK PAYMENT WEBHOOK
-# ============================================================
 
 @app.post("/webhook/paystack")
 async def paystack_webhook(request: Request, background_tasks: BackgroundTasks):
     """
     Receives payment confirmations from Paystack.
-    Same pattern: read body first, then process in background.
+    FIXED: Stricter HMAC verification — rejects if secret key missing.
     """
     import hmac
     import hashlib
@@ -238,7 +221,11 @@ async def paystack_webhook(request: Request, background_tasks: BackgroundTasks):
         body_bytes = await request.body()
         paystack_signature = request.headers.get("x-paystack-signature", "")
 
-        if settings.PAYSTACK_SECRET_KEY and paystack_signature:
+        if settings.PAYSTACK_SECRET_KEY:
+            if not paystack_signature:
+                print("Paystack webhook received without signature — rejecting")
+                raise HTTPException(status_code=400, detail="Missing signature")
+
             computed = hmac.new(
                 settings.PAYSTACK_SECRET_KEY.encode('utf-8'),
                 body_bytes,
@@ -246,8 +233,12 @@ async def paystack_webhook(request: Request, background_tasks: BackgroundTasks):
             ).hexdigest()
 
             if paystack_signature != computed:
-                print(f"❌ Invalid Paystack signature")
+                print(f"Invalid Paystack signature — possible forgery attempt")
                 raise HTTPException(status_code=400, detail="Invalid signature")
+        else:
+            # No secret key configured — block ALL webhook processing
+            print("WARNING: PAYSTACK_SECRET_KEY not set. Rejecting webhook for security.")
+            raise HTTPException(status_code=503, detail="Payment webhook not configured")
 
         try:
             body_data = json.loads(body_bytes)
@@ -260,7 +251,7 @@ async def paystack_webhook(request: Request, background_tasks: BackgroundTasks):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Paystack webhook error: {e}")
+        print(f"Paystack webhook error: {e}")
         return JSONResponse(content={"status": "error_logged"}, status_code=200)
 
 
@@ -270,7 +261,7 @@ async def process_paystack_event(body_data: dict):
         event = body_data.get('event', '')
         data = body_data.get('data', {})
 
-        print(f"💳 Paystack event: {event}")
+        print(f"Paystack event: {event}")
 
         if event == 'charge.success':
             await handle_successful_payment(data)
@@ -280,16 +271,21 @@ async def process_paystack_event(body_data: dict):
             print(f"Unhandled Paystack event: {event}")
 
     except Exception as e:
-        print(f"❌ Paystack processing error: {e}")
+        print(f"Paystack processing error: {e}")
         import traceback
         traceback.print_exc()
 
 
 async def handle_successful_payment(payment_data: dict):
-    """Activates subscription or adds PAYG credits after successful Paystack payment."""
+    """
+    Activates subscription or adds PAYG credits after successful Paystack payment.
+    FIXED: Now checks for duplicate payments before processing.
+    FIXED: Verifies amount matches expected price to prevent plan manipulation.
+    """
     from database.client import supabase
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
+
     reference = payment_data.get('reference', '')
     amount_kobo = payment_data.get('amount', 0)
     amount_naira = amount_kobo // 100
@@ -303,11 +299,44 @@ async def handle_successful_payment(payment_data: dict):
     print(f"Payment confirmed: {reference} | N{amount_naira} | {plan} {billing_period}")
 
     if not student_id:
-        print(f"Payment {reference} has no student_id in metadata")
+        print(f"Payment {reference} has no student_id in metadata — cannot process")
         return
+
+    # FIXED: Check for duplicate payment before doing anything
+    try:
+        existing_payment = supabase.table('payments')\
+            .select('id')\
+            .eq('paystack_reference', reference)\
+            .execute()
+
+        if existing_payment.data:
+            print(f"Payment {reference} already processed — skipping duplicate webhook")
+            return
+    except Exception as e:
+        print(f"Duplicate check error: {e}")
+        # Continue cautiously — better to try than to silently skip
+
+    # FIXED: Verify amount matches expected price to prevent manipulation
+    if plan != 'payg':
+        price_map = {
+            ('scholar', 'monthly'): settings.SCHOLAR_MONTHLY,
+            ('scholar', 'yearly'): settings.SCHOLAR_YEARLY,
+            ('pro', 'monthly'): settings.PRO_MONTHLY,
+            ('pro', 'yearly'): settings.PRO_YEARLY,
+            ('elite', 'monthly'): settings.ELITE_MONTHLY,
+            ('elite', 'yearly'): settings.ELITE_YEARLY,
+        }
+        expected_amount = price_map.get((plan, billing_period))
+        if expected_amount and amount_naira < (expected_amount - 10):
+            print(
+                f"FRAUD ALERT: Payment {reference} paid N{amount_naira} "
+                f"but {plan} {billing_period} costs N{expected_amount}. Rejecting."
+            )
+            return
 
     now = datetime.now(ZoneInfo("Africa/Lagos"))
 
+    # Record the payment
     try:
         supabase.table('payments').insert({
             'student_id': student_id,
@@ -319,6 +348,8 @@ async def handle_successful_payment(payment_data: dict):
         }).execute()
     except Exception as e:
         print(f"Payment record error: {e}")
+        # If we can't record it, don't activate either
+        return
 
     student_result = supabase.table('students').select('name').eq('id', student_id).execute()
     phone_result = supabase.table('platform_sessions').select('platform_user_id')\
@@ -368,15 +399,18 @@ async def handle_successful_payment(payment_data: dict):
                 'updated_at': now.isoformat(),
             }).eq('id', student_id).execute()
 
-            supabase.table('subscriptions').insert({
-                'student_id': student_id,
-                'tier': plan,
-                'billing_period': billing_period,
-                'amount_naira': amount_naira,
-                'started_at': now.isoformat(),
-                'expires_at': expires.isoformat(),
-                'is_active': True,
-            }).execute()
+            try:
+                supabase.table('subscriptions').insert({
+                    'student_id': student_id,
+                    'tier': plan,
+                    'billing_period': billing_period,
+                    'amount_naira': amount_naira,
+                    'started_at': now.isoformat(),
+                    'expires_at': expires.isoformat(),
+                    'is_active': True,
+                }).execute()
+            except Exception as sub_err:
+                print(f"Subscription record error (non-critical): {sub_err}")
 
             if student_phone:
                 from whatsapp.sender import send_whatsapp_message
@@ -397,13 +431,11 @@ async def handle_successful_payment(payment_data: dict):
             traceback.print_exc()
 
 
-# ============================================================
-# ADMIN API ENDPOINTS
-# ============================================================
+# ADMIN ENDPOINTS — All protected by X-Admin-Key header
 
-@app.get("/admin/stats")
+@app.get("/admin/stats", dependencies=[Depends(verify_admin_key)])
 async def get_admin_stats():
-    """Returns platform statistics. Add authentication before going to production."""
+    """Returns platform statistics. Requires X-Admin-Key header."""
     from database.client import supabase, redis_client
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -439,7 +471,7 @@ async def get_admin_stats():
         return {"error": str(e)}
 
 
-@app.post("/admin/broadcast")
+@app.post("/admin/broadcast", dependencies=[Depends(verify_admin_key)])
 async def api_broadcast(request: Request, background_tasks: BackgroundTasks):
     """
     HTTP endpoint to send broadcast messages.
@@ -464,15 +496,14 @@ async def run_broadcast(target: str, message: str):
     """Runs a broadcast in the background."""
     try:
         from admin.dashboard import admin_broadcast
-        # We simulate being admin by calling the function directly
         from config.settings import settings
         if settings.ADMIN_WHATSAPP:
             await admin_broadcast(settings.ADMIN_WHATSAPP, f"{target} {message}")
     except Exception as e:
-        print(f"❌ API broadcast error: {e}")
+        print(f"API broadcast error: {e}")
 
 
-@app.post("/admin/create-promo")
+@app.post("/admin/create-promo", dependencies=[Depends(verify_admin_key)])
 async def api_create_promo(request: Request):
     """
     HTTP endpoint to create promo codes.
@@ -499,7 +530,7 @@ async def api_create_promo(request: Request):
         return {"success": False, "error": str(e)}
 
 
-@app.post("/admin/send-message")
+@app.post("/admin/send-message", dependencies=[Depends(verify_admin_key)])
 async def api_send_message(request: Request):
     """
     HTTP endpoint to send a message to a specific student.
@@ -527,14 +558,14 @@ async def api_send_message(request: Request):
             return {"success": False, "error": "Student not on WhatsApp"}
 
         phone = phone_result.data[0]['platform_user_id']
-        await send_whatsapp_message(phone, f"📢 *Message from WaxPrep:*\n\n{message}")
+        await send_whatsapp_message(phone, f"Message from WaxPrep:\n\n{message}")
 
         return {"success": True, "sent_to": wax_id}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
-@app.get("/admin/trigger-report")
+@app.get("/admin/trigger-report", dependencies=[Depends(verify_admin_key)])
 async def trigger_daily_report(background_tasks: BackgroundTasks):
     """Manually triggers the daily admin report."""
     from utils.scheduler import send_daily_admin_report
@@ -542,7 +573,7 @@ async def trigger_daily_report(background_tasks: BackgroundTasks):
     return {"success": True, "message": "Daily report triggered — check your WhatsApp"}
 
 
-@app.get("/admin/trigger-challenge")
+@app.get("/admin/trigger-challenge", dependencies=[Depends(verify_admin_key)])
 async def trigger_daily_challenge(background_tasks: BackgroundTasks):
     """Manually triggers daily challenge generation."""
     from utils.scheduler import generate_daily_challenge
@@ -550,7 +581,7 @@ async def trigger_daily_challenge(background_tasks: BackgroundTasks):
     return {"success": True, "message": "Challenge generation triggered"}
 
 
-@app.get("/admin/student/{wax_id}")
+@app.get("/admin/student/{wax_id}", dependencies=[Depends(verify_admin_key)])
 async def get_student_info(wax_id: str):
     """Returns information about a specific student."""
     try:
@@ -566,7 +597,6 @@ async def get_student_info(wax_id: str):
             return {"found": False}
 
         s = result.data[0]
-        # Remove sensitive fields
         s.pop('pin_hash', None)
         s.pop('phone_hash', None)
         s.pop('recovery_code', None)
@@ -575,10 +605,6 @@ async def get_student_info(wax_id: str):
     except Exception as e:
         return {"error": str(e)}
 
-
-# ============================================================
-# RUN SERVER
-# ============================================================
 
 if __name__ == "__main__":
     uvicorn.run(
