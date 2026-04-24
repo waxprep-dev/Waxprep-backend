@@ -1,25 +1,7 @@
 """
 Study Flow — The Main Learning Experience
-
-This is the heart of WaxPrep. When a student asks a question,
-this is what makes the response intelligent, personal, and helpful.
-
-The flow handles:
-1. Learn mode — deep explanations with diagnostic teaching
-2. Regular question answering
-3. Session management (pause, continue, stop)
-4. Topic transitions
-5. Concept map building after multiple topics
-6. Nigerian context injection
-
-The key insight is that this is NOT a simple question-answer chatbot.
-Every response is shaped by:
-- What the student already knows (diagnostic)
-- Their mastery level in this topic (Elo rating)
-- Their preferred language (English or Pidgin)
-- Their exam type (JAMB focuses differ from WAEC)
-- Their learning style (example-based, step-by-step, analytical)
-- What they studied recently in this session
+FIXED: Removed broken utils.helpers import
+FIXED: Circular import resolved — award_badge now from features.badges
 """
 
 from whatsapp.sender import send_whatsapp_message
@@ -38,7 +20,8 @@ from features.daily_challenge import (
     format_daily_challenge, submit_challenge_answer
 )
 from database.client import supabase
-from utils.helpers import nigeria_today
+from helpers import nigeria_today
+
 
 async def handle_study_message(
     phone: str,
@@ -54,38 +37,32 @@ async def handle_study_message(
     state = conversation.get('conversation_state', {})
     current_mode = conversation.get('current_mode', 'default')
     awaiting = state.get('awaiting_response_for')
-    
-    # Handle daily challenge
+
     if intent == 'COMMAND' and message.strip().upper() in ['CHALLENGE', 'DAILY', 'DAILY CHALLENGE']:
         await handle_daily_challenge(phone, student, conversation)
         return
-    
-    # Handle quiz answer if waiting for one
+
     if awaiting == 'quiz_answer':
         await handle_quiz_answer(phone, student, conversation, message, state)
         return
-    
-    # Handle quiz continuation
+
     if awaiting == 'quiz_continue':
         msg_upper = message.strip().upper()
         if msg_upper in ['YES', 'Y', 'NEXT', 'CONTINUE', '1', 'ANOTHER']:
-            # Get next question
             subject = conversation.get('current_subject', '')
             topic = conversation.get('current_topic', '')
             await deliver_quiz_question(phone, student, conversation, subject, topic, state)
             return
         else:
-            # They want to do something else — process as new message
             await handle_academic_message(phone, student, conversation, message, intent)
             return
-    
-    # Handle exam setup choices
+
     if awaiting == 'exam_setup_choice':
         from whatsapp.flows.mock_exam import start_mock_exam
-        
+
         choice = message.strip()
         suggested_type = state.get('suggested_exam_type', 'JAMB')
-        
+
         if choice == '1':
             await start_mock_exam(phone, student, conversation, suggested_type)
         elif choice == '2':
@@ -103,25 +80,24 @@ async def handle_study_message(
                 }
             })
         return
-    
-    # Handle REQUEST_QUIZ intent
+
     if intent == 'REQUEST_QUIZ':
         subject = extract_subject_from_message(message)
         topic = extract_topic_from_message(message)
-        
+
         if not subject:
             await send_whatsapp_message(
                 phone,
-                "Which subject should I quiz you on? 📚\n\n"
-                "For example: *Quiz me on Physics* or *Test me on Mathematics*"
+                "Which subject should I quiz you on?\n\n"
+                "For example: Quiz me on Physics or Test me on Mathematics"
             )
             return
-        
+
         await deliver_quiz_question(phone, student, conversation, subject, topic, state)
         return
-    
-    # All other academic messages go to the AI
+
     await handle_academic_message(phone, student, conversation, message, intent)
+
 
 async def handle_academic_message(
     phone: str,
@@ -135,10 +111,9 @@ async def handle_academic_message(
     This handles the core learn/explain/help functions.
     """
     current_mode = conversation.get('current_mode', 'default')
-    
-    # Detect mode switches
+
     msg_upper = message.strip().upper()
-    
+
     if msg_upper.startswith('LEARN ') or msg_upper == 'LEARN':
         current_mode = 'learn'
         await update_conversation_state(conversation['id'], 'whatsapp', phone, {
@@ -149,14 +124,10 @@ async def handle_academic_message(
         await update_conversation_state(conversation['id'], 'whatsapp', phone, {
             'current_mode': 'revision'
         })
-    
-    # Build personalized system prompt
+
     system_prompt = get_main_tutor_prompt(student, current_mode)
-    
-    # Get conversation history
     history = await get_conversation_history(conversation['id'])
-    
-    # Route to AI
+
     response = await route_and_respond(
         message=message,
         intent=intent,
@@ -165,21 +136,20 @@ async def handle_academic_message(
         conversation_state=conversation.get('conversation_state', {}),
         system_prompt=system_prompt
     )
-    
+
     await send_whatsapp_message(phone, response)
-    
-    # Update topic being studied based on the message
+
     subject = extract_subject_from_message(message)
     topic = extract_topic_from_message(message)
-    
+
     if subject or topic:
         updates = {}
         if subject:
             updates['current_subject'] = subject
         if topic:
             updates['current_topic'] = topic
-        
         await update_conversation_state(conversation['id'], 'whatsapp', phone, updates)
+
 
 async def handle_quiz_answer(
     phone: str,
@@ -188,9 +158,15 @@ async def handle_quiz_answer(
     message: str,
     state: dict
 ):
-    """Handles a student's answer during a quiz session."""
+    """
+    Handles a student's answer during a quiz session.
+    FIXED: award_badge now from features.badges to avoid circular import.
+    """
+    # FIXED: Import from features.badges, not from whatsapp.handler
+    from features.badges import award_badge
+
     current_question = state.get('current_question')
-    
+
     if not current_question:
         await send_whatsapp_message(
             phone,
@@ -200,18 +176,17 @@ async def handle_quiz_answer(
             'conversation_state': {}
         })
         return
-    
+
     is_correct, feedback = evaluate_quiz_answer(
         message.strip(),
         current_question.get('correct_answer', 'A'),
         current_question
     )
-    
+
     if is_correct is None:
         await send_whatsapp_message(phone, feedback)
         return
-    
-    # Update mastery
+
     await update_mastery_after_answer(
         student_id=student['id'],
         subject=current_question.get('subject', ''),
@@ -219,42 +194,37 @@ async def handle_quiz_answer(
         question_difficulty=current_question.get('difficulty_level', 5),
         is_correct=is_correct
     )
-    
-    # Update question stats in the bank
+
     if current_question.get('id'):
         from database.questions import update_question_stats
         await update_question_stats(current_question['id'], is_correct)
-    
-    # Calculate and award points
-    from whatsapp.handler import award_badge
+
     points, badge = await calculate_and_award_points(
         student_id=student['id'],
         is_correct=is_correct,
         question_difficulty=current_question.get('difficulty_level', 5)
     )
-    
-    # Build complete feedback
+
     session_q = state.get('session_questions', 0) + 1
     session_correct = state.get('session_correct', 0) + (1 if is_correct else 0)
-    
+
     full_feedback = feedback
-    full_feedback += f"\n\n+{points} point{'s' if points != 1 else ''}! 💰"
-    
+    full_feedback += f"\n\n+{points} point{'s' if points != 1 else ''}!"
+
     if badge:
-        full_feedback += f"\n\n🏅 *New Badge Unlocked: {badge['name']}!*\n{badge['description']}"
-    
+        full_feedback += f"\n\nNew Badge Unlocked: {badge['name']}!\n{badge['description']}"
+
     if session_q % 5 == 0 and session_q > 0:
         accuracy = round((session_correct / session_q) * 100)
         full_feedback += (
-            f"\n\n📊 *Session Summary:*\n"
+            f"\n\nSession Summary:\n"
             f"{session_q} questions | {session_correct} correct | {accuracy}%"
         )
-    
-    full_feedback += "\n\n_*NEXT* for another question, or ask me anything to switch topics._"
-    
+
+    full_feedback += "\n\n_Type NEXT for another question, or ask me anything to switch topics._"
+
     await send_whatsapp_message(phone, full_feedback)
-    
-    # Update state
+
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {
         'conversation_state': {
             **state,
@@ -266,6 +236,7 @@ async def handle_quiz_answer(
         }
     })
 
+
 async def deliver_quiz_question(
     phone: str,
     student: dict,
@@ -276,24 +247,22 @@ async def deliver_quiz_question(
 ):
     """Gets and delivers a quiz question to the student."""
     from database.questions import get_student_recently_seen_questions, record_question_seen
-    
-    seen_ids = await get_student_recently_seen_questions(student['id'])
-    
+
     question = await get_question_for_student(
         student_id=student['id'],
         subject=subject,
         topic=topic,
         exam_type=student.get('target_exam', 'JAMB')
     )
-    
+
     if not question:
         await send_whatsapp_message(
             phone,
-            f"I'm still building my {subject} question bank! 📚\n\n"
+            f"I'm still building my {subject} question bank!\n\n"
             f"Let me generate a fresh question just for you...\n\n"
-            f"_(This uses AI to create exam-quality questions.)_"
+            f"This uses AI to create exam-quality questions."
         )
-        
+
         from ai.gemini_client import generate_questions_with_gemini
         questions = await generate_questions_with_gemini(
             subject=subject,
@@ -302,26 +271,24 @@ async def deliver_quiz_question(
             difficulty=5,
             count=3
         )
-        
+
         if questions:
             question = questions[0]
         else:
             await send_whatsapp_message(
                 phone,
-                f"I couldn't generate a {subject} question right now. 😕\n\n"
-                f"Try a different subject, or ask me to *LEARN* {subject} first."
+                f"I couldn't generate a {subject} question right now.\n\n"
+                f"Try a different subject, or ask me to LEARN {subject} first."
             )
             return
-    
+
     session_q = state.get('session_questions', 0)
     formatted = format_question_for_whatsapp(question, session_q + 1)
     await send_whatsapp_message(phone, formatted)
-    
-    # Record that student saw this question
+
     if question.get('id'):
         await record_question_seen(student['id'], question['id'])
-    
-    # Update state
+
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {
         'current_mode': 'quiz',
         'current_subject': subject,
@@ -333,46 +300,42 @@ async def deliver_quiz_question(
         }
     })
 
+
 async def handle_daily_challenge(phone: str, student: dict, conversation: dict):
     """Handles the CHALLENGE command — shows today's daily challenge."""
-    
+
     challenge = await get_todays_challenge()
-    
+
     if not challenge:
         await send_whatsapp_message(
             phone,
-            "⚔️ Today's challenge hasn't been generated yet!\n\n"
+            "Today's challenge hasn't been generated yet!\n\n"
             "Daily challenges go live at *8:00 AM Lagos time*.\n\n"
-            "Come back then! 💪"
+            "Come back then!"
         )
         return
-    
+
     already_attempted = await has_student_attempted_today(student['id'])
-    
+
     if already_attempted:
-        # Show results
         total_attempts = challenge.get('total_attempts', 0)
         total_correct = challenge.get('total_correct', 0)
         correct_rate = round((total_correct / total_attempts) * 100) if total_attempts > 0 else 0
-        
-        winner_id = challenge.get('winner_wax_id', 'Unknown')
-        
+
         await send_whatsapp_message(
             phone,
-            f"⚔️ *Daily Challenge — {challenge.get('challenge_date')}*\n\n"
-            f"You've already attempted today's challenge! ✅\n\n"
-            f"📊 *Results so far:*\n"
+            f"Daily Challenge — {challenge.get('challenge_date')}\n\n"
+            f"You've already attempted today's challenge!\n\n"
+            f"Results so far:\n"
             f"Total attempts: {total_attempts}\n"
             f"Got it right: {total_correct} ({correct_rate}%)\n\n"
-            f"Come back tomorrow at 8 AM for a new challenge! 🌅"
+            f"Come back tomorrow at 8 AM for a new challenge!"
         )
         return
-    
-    # Show the challenge
+
     formatted = format_daily_challenge(challenge)
     await send_whatsapp_message(phone, formatted)
-    
-    # Update state to await challenge answer
+
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {
         'conversation_state': {
             'awaiting_response_for': 'challenge_answer',
@@ -381,6 +344,7 @@ async def handle_daily_challenge(phone: str, student: dict, conversation: dict):
         }
     })
 
+
 async def handle_challenge_answer(
     phone: str,
     student: dict,
@@ -388,41 +352,43 @@ async def handle_challenge_answer(
     message: str,
     state: dict
 ):
-    """Handles a student's answer to the daily challenge."""
+    """
+    Handles a student's answer to the daily challenge.
+    FIXED: award_badge now from features.badges to avoid circular import.
+    """
+    # FIXED: Import from features.badges, not from whatsapp.handler
+    from features.badges import award_badge
+
     challenge = state.get('current_challenge')
-    
+
     if not challenge:
         await send_whatsapp_message(phone, "I lost the challenge question! Type *CHALLENGE* to get it again.")
         return
-    
+
     is_correct, feedback, points = await submit_challenge_answer(
         student_id=student['id'],
         answer=message.strip(),
         challenge=challenge
     )
-    
+
     if is_correct is None:
         await send_whatsapp_message(phone, feedback)
         return
-    
+
     await send_whatsapp_message(phone, feedback)
-    
-    # Clear challenge state
+
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {
         'conversation_state': {}
     })
-    
-    # Award badge for first daily challenge
-    from whatsapp.handler import award_badge
+
     await award_badge(student['id'], 'DAILY_CHALLENGE_FIRST')
-    
+
     if is_correct:
-        # Check if they were the winner
         updated_challenge = supabase.table('daily_challenges')\
             .select('winner_student_id')\
             .eq('id', challenge['id'])\
             .execute()
-        
+
         if updated_challenge.data:
             winner_id = updated_challenge.data[0].get('winner_student_id')
             if str(winner_id) == str(student['id']):
