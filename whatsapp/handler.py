@@ -1,24 +1,15 @@
 """
-WhatsApp Message Handler — Complete Rewrite
-FIXES:
-Uses correct function names from the actual codebase
-Removed all references to functions that do not exist
-Proper student lookup flow
-Correct admin detection
-No circular imports (badge awarding now in features/badges.py)
-Natural conversation with feedback prompts every 5 questions
-Bug reporting system
-PAYG support
+WhatsApp Message Handler
+FIXED: Correct function names, proper student lookup, no circular imports
+ADDED: Streak updating logic, level up detection, total_questions_correct tracking
 """
 from config.settings import settings
 from helpers import nigeria_today, get_time_of_day, sanitize_input
 import random
 
+
 async def process_single_message(message_data: dict, value: dict) -> None:
-    """
-    Entry point called by main.py.
-    Unpacks webhook data and routes to process_message.
-    """
+    """Entry point called by main.py."""
     from whatsapp.sender import send_whatsapp_message
     phone = message_data.get('from', '')
     message_id = message_data.get('id', '')
@@ -34,27 +25,22 @@ async def process_single_message(message_data: dict, value: dict) -> None:
 
     if message_type == 'text':
         message = message_data.get('text', {}).get('body', '')
-
     elif message_type == 'image':
         image_data = message_data.get('image', {})
         message = image_data.get('caption', '')
         media_id = image_data.get('id', '')
-
     elif message_type in ['voice', 'audio']:
         audio_data = message_data.get('audio', message_data.get('voice', {}))
         media_id = audio_data.get('id', '')
         message = ''
-
     elif message_type == 'button':
         message = message_data.get('button', {}).get('text', '')
-
     elif message_type == 'interactive':
         interactive = message_data.get('interactive', {})
         if 'button_reply' in interactive:
             message = interactive['button_reply'].get('title', '')
         elif 'list_reply' in interactive:
             message = interactive['list_reply'].get('title', '')
-
     else:
         message = message_data.get('text', {}).get('body', '')
 
@@ -93,17 +79,15 @@ async def process_single_message(message_data: dict, value: dict) -> None:
         except Exception:
             pass
 
+
 async def process_message(phone: str, name: str, message: str, message_type: str = 'text', media_id: str = None) -> None:
-    """
-    Main message router. All WhatsApp messages pass through here.
-    This function sends responses directly rather than returning them.
-    """
+    """Main message router. All WhatsApp messages pass through here."""
     from whatsapp.sender import send_whatsapp_message
     from features.wax_id import student_exists_in_platform
     from database.conversations import get_or_create_conversation, save_message, get_conversation_history
     from admin.dashboard import is_admin, handle_admin_command
+
     msg_upper = message.strip().upper()
-    msg_lower = message.strip().lower()
 
     if is_admin(phone) and msg_upper.startswith('ADMIN '):
         await handle_admin_command(phone, message)
@@ -276,25 +260,98 @@ async def process_message(phone: str, name: str, message: str, message_type: str
         from whatsapp.flows.study import handle_study_message
         await handle_study_message(phone, student, conversation, message, intent)
 
+
 async def _check_question_limit(student: dict) -> tuple:
     """Returns (can_ask, message) after checking daily limits."""
     from database.students import can_student_ask_question
     return await can_student_ask_question(student)
 
+
 async def _increment_and_maybe_prompt_feedback(phone: str, student: dict, conversation: dict):
     """
-    Increments question count and shows feedback prompt every 5 questions.
+    Increments question count, updates streak, checks level up,
+    and shows feedback prompt every 5 questions.
+    ADDED: Full streak logic, level-up detection, total_questions_answered tracking.
     """
     from database.students import increment_questions_today
     from database.client import supabase
+
     await increment_questions_today(student['id'])
 
+    # Update total questions answered
     try:
         supabase.table('students').update({
             'total_questions_answered': student.get('total_questions_answered', 0) + 1
         }).eq('id', student['id']).execute()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"total_questions_answered update error (non-critical): {e}")
+
+    # ADDED: Streak updating logic
+    try:
+        from helpers import nigeria_today
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        today = nigeria_today()
+        yesterday = (datetime.now(ZoneInfo("Africa/Lagos")) - timedelta(days=1)).strftime('%Y-%m-%d')
+
+        fresh = supabase.table('students')\
+            .select('last_study_date, current_streak, longest_streak')\
+            .eq('id', student['id']).execute()
+
+        if fresh.data:
+            s = fresh.data[0]
+            last_date = s.get('last_study_date')
+            current_streak = s.get('current_streak', 0)
+            longest_streak = s.get('longest_streak', 0)
+
+            streak_updates = {}
+            new_streak = current_streak
+
+            if last_date == today:
+                # Already studied today — no change needed
+                pass
+            elif last_date == yesterday:
+                # Consecutive day — increment streak
+                new_streak = current_streak + 1
+                new_longest = max(longest_streak, new_streak)
+                streak_updates['current_streak'] = new_streak
+                streak_updates['longest_streak'] = new_longest
+                streak_updates['last_study_date'] = today
+            else:
+                # Streak broken or brand new student
+                new_streak = 1
+                streak_updates['current_streak'] = 1
+                streak_updates['last_study_date'] = today
+
+            if streak_updates:
+                supabase.table('students').update(streak_updates).eq('id', student['id']).execute()
+
+            # Check for streak milestone badges and notify
+            streak_milestones = {3, 7, 14, 30, 60, 100}
+            if new_streak in streak_milestones and last_date != today:
+                try:
+                    from features.badges import check_streak_badges
+                    from whatsapp.sender import send_whatsapp_message
+                    new_badges = await check_streak_badges(student['id'], new_streak)
+                    for badge in new_badges:
+                        await send_whatsapp_message(
+                            phone,
+                            f"Streak Badge Unlocked!\n\n"
+                            f"*{badge['name']}*\n{badge['description']}\n\n"
+                            f"{new_streak}-day streak! Keep it up!"
+                        )
+                except Exception as badge_err:
+                    print(f"Streak badge error (non-critical): {badge_err}")
+
+    except Exception as streak_err:
+        print(f"Streak update error (non-critical): {streak_err}")
+
+    # ADDED: Level up check
+    try:
+        await _check_and_update_level(student['id'], phone)
+    except Exception as level_err:
+        print(f"Level check error (non-critical): {level_err}")
 
     conv_state = conversation.get('conversation_state', {})
     session_questions = conv_state.get('session_questions', 0) + 1
@@ -319,13 +376,66 @@ async def _increment_and_maybe_prompt_feedback(phone: str, student: dict, conver
             }
         })
 
+
+async def _check_and_update_level(student_id: str, phone: str):
+    """
+    Checks if a student has earned enough points to level up.
+    Sends a celebration message if they leveled up.
+    ADDED: This function was completely missing before — no students ever leveled up.
+    """
+    from database.client import supabase
+    from config.settings import settings
+    from whatsapp.sender import send_whatsapp_message
+
+    try:
+        result = supabase.table('students')\
+            .select('total_points, current_level, level_name, name')\
+            .eq('id', student_id).execute()
+
+        if not result.data:
+            return
+
+        s = result.data[0]
+        points = s.get('total_points', 0)
+        current_level = s.get('current_level', 1)
+
+        # Find the highest level this student qualifies for
+        new_level = 1
+        for level, threshold in sorted(settings.LEVEL_THRESHOLDS.items()):
+            if points >= threshold:
+                new_level = level
+
+        if new_level > current_level:
+            new_level_name = settings.get_level_name(new_level)
+            supabase.table('students').update({
+                'current_level': new_level,
+                'level_name': new_level_name,
+            }).eq('id', student_id).execute()
+
+            name = s.get('name', 'Student').split()[0]
+            await send_whatsapp_message(
+                phone,
+                f"LEVEL UP, {name}!\n\n"
+                f"You reached *Level {new_level} — {new_level_name}!*\n\n"
+                f"Total Points: {points:,}\n\n"
+                f"Keep studying to reach the next level!"
+            )
+    except Exception as e:
+        print(f"Level update error (non-critical): {e}")
+
+
 async def _handle_quiz_answer(phone: str, student: dict, conversation: dict, message: str, state: dict):
-    """Handles a student's answer during a quiz session."""
+    """
+    Handles a student's answer during a quiz session.
+    ADDED: Now updates total_questions_correct properly.
+    """
     from whatsapp.sender import send_whatsapp_message
     from features.quiz_engine import evaluate_quiz_answer, update_mastery_after_answer, calculate_and_award_points
     from database.questions import update_question_stats
     from database.conversations import update_conversation_state
     from features.badges import award_badge, check_and_award_milestone_badges
+    from database.client import supabase
+
     current_question = state.get('current_question')
 
     if not current_question:
@@ -358,6 +468,16 @@ async def _handle_quiz_answer(phone: str, student: dict, conversation: dict, mes
 
     if current_question.get('id'):
         await update_question_stats(current_question['id'], is_correct)
+
+    # ADDED: Update total_questions_correct when answer is correct
+    try:
+        update_data = {}
+        if is_correct:
+            update_data['total_questions_correct'] = student.get('total_questions_correct', 0) + 1
+        if update_data:
+            supabase.table('students').update(update_data).eq('id', student['id']).execute()
+    except Exception as e:
+        print(f"total_questions_correct update error (non-critical): {e}")
 
     points, _ = await calculate_and_award_points(
         student_id=student['id'],
@@ -400,6 +520,7 @@ async def _handle_quiz_answer(phone: str, student: dict, conversation: dict, mes
 
     await _increment_and_maybe_prompt_feedback(phone, student, conversation)
 
+
 async def _handle_image_message(phone: str, student: dict, media_id: str, caption: str):
     """Handles image uploads."""
     from whatsapp.sender import send_whatsapp_message
@@ -412,10 +533,10 @@ async def _handle_image_message(phone: str, student: dict, media_id: str, captio
             phone,
             "Image analysis is a Scholar Plan feature!\n\n"
             "With Scholar Plan, you can:\n"
-            "- Send photos of your textbooks\n"
-            "- Send past question papers\n"
-            "- Send your handwritten notes\n"
-            "- Send diagrams for explanation\n\n"
+            "Send photos of your textbooks\n"
+            "Send past question papers\n"
+            "Send your handwritten notes\n"
+            "Send diagrams for explanation\n\n"
             "Type SUBSCRIBE to upgrade."
         )
         return
@@ -450,11 +571,12 @@ async def _handle_image_message(phone: str, student: dict, media_id: str, captio
             phone,
             "I had trouble reading that image.\n\n"
             "Please try:\n"
-            "- Taking a clearer photo in good lighting\n"
-            "- Making sure the text is clearly visible\n"
-            "- Sending just one page at a time\n\n"
+            "Taking a clearer photo in good lighting\n"
+            "Making sure the text is clearly visible\n"
+            "Sending just one page at a time\n\n"
             "Or type your question and I will help immediately!"
         )
+
 
 async def _handle_voice_message(phone: str, student: dict, media_id: str):
     """Handles voice notes."""
@@ -466,6 +588,7 @@ async def _handle_voice_message(phone: str, student: dict, media_id: str):
         "Voice transcription is coming soon.\n\n"
         "For now, please type your question and I will answer it right away!"
     )
+
 
 async def _handle_greeting(student: dict, phone: str) -> str:
     """Handle greetings with context."""
@@ -506,6 +629,7 @@ async def _handle_greeting(student: dict, phone: str) -> str:
         "Back for more! What do you want to work on next?"
     )
 
+
 async def _handle_payment_inquiry(student: dict) -> str:
     """Handle subscription questions with correct pricing."""
     from config.settings import settings
@@ -540,6 +664,7 @@ async def _handle_payment_inquiry(student: dict) -> str:
         f"Type SUBSCRIBE to upgrade to a plan, or PAYG for question credits."
     )
 
+
 async def _handle_casual_chat(message: str, student: dict) -> str:
     """Handle casual chat with a study redirect."""
     from ai.brain import process_message_with_ai
@@ -557,6 +682,7 @@ async def _handle_casual_chat(message: str, student: dict) -> str:
 
     return result or f"Ha! Anyway {name}, ready to study? What subject?"
 
+
 async def save_conversation_message(conversation_id: str, student_id: str, platform: str, role: str, content: str):
     """Saves a message to conversation history."""
     from database.conversations import save_message
@@ -564,6 +690,7 @@ async def save_conversation_message(conversation_id: str, student_id: str, platf
         await save_message(conversation_id, student_id, platform, role, content)
     except Exception as e:
         print(f"Save message error: {e}")
+
 
 async def award_badge(student_id: str, badge_code: str) -> dict | None:
     """Wrapper for backward compatibility — uses features.badges now."""
