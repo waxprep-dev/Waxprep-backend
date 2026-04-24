@@ -56,6 +56,56 @@ async def handle_command(phone: str, student: dict, conversation: dict, message:
         await handler(phone, student, conversation, message)
     else:
         await handle_help(phone, student, conversation, message)
+async def handle_payg(phone: str, student: dict, conversation: dict, message: str):
+"""Handles Pay-As-You-Go question credit purchases."""
+from whatsapp.sender import send_whatsapp_message
+from config.settings import settings
+parts = message.strip().upper().split()
+package = parts[1] if len(parts) > 1 else None
+
+if not package or package not in ['100', '250', '500']:
+    await send_whatsapp_message(
+        phone,
+        "Pay As You Go — Buy Question Credits\n\n"
+        "No subscription needed. Buy exactly what you need.\n\n"
+        f"PAYG 100 — N{settings.PAYG_100_QUESTIONS:,} for 100 questions\n"
+        f"PAYG 250 — N{settings.PAYG_250_QUESTIONS:,} for 250 questions\n"
+        f"PAYG 500 — N{settings.PAYG_500_QUESTIONS:,} for 500 questions\n\n"
+        "Credits never expire.\n\n"
+        "Example: Type PAYG 100 to buy 100 question credits"
+    )
+    return
+
+name = student.get('name', 'Student').split()[0]
+await send_whatsapp_message(phone, f"Generating your payment link, {name}...")
+
+try:
+    from database.subscriptions import generate_payg_payment_link
+    link = await generate_payg_payment_link(student, package)
+
+    package_prices = {
+        '100': settings.PAYG_100_QUESTIONS,
+        '250': settings.PAYG_250_QUESTIONS,
+        '500': settings.PAYG_500_QUESTIONS,
+    }
+    amount = package_prices[package]
+
+    await send_whatsapp_message(
+        phone,
+        f"Your Payment Link is Ready!\n\n"
+        f"Package: {package} question credits\n"
+        f"Amount: N{amount:,}\n\n"
+        f"Tap to pay securely:\n{link}\n\n"
+        f"Credits are added automatically after payment."
+    )
+
+except Exception as e:
+    print(f"PAYG link error: {e}")
+    await send_whatsapp_message(
+        phone,
+        "I could not generate a payment link right now.\n\n"
+        "Please try again in a few minutes, or type SUBSCRIBE for a monthly plan."
+    )
 
 
 async def handle_progress(phone: str, student: dict, conversation: dict, message: str):
