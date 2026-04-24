@@ -9,6 +9,7 @@ class Settings:
     ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
     SECRET_KEY = os.getenv("SECRET_KEY", "waxprep-change-this")
     ADMIN_WHATSAPP = os.getenv("ADMIN_WHATSAPP")
+    ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
     TIMEZONE = "Africa/Lagos"
     SUPABASE_URL = os.getenv("SUPABASE_URL")
     SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
@@ -82,8 +83,9 @@ class Settings:
     SESSION_TIMEOUT_MINUTES = 30
     SESSION_RESUME_WINDOW_HOURS = 6
 
-    TERMS_URL = "https://waxprep.ng/terms"
-    PRIVACY_URL = "https://waxprep.ng/privacy"
+    # FIXED: Changed from waxprep.ng (dead domain) to live GitHub Pages URL
+    TERMS_URL = "https://waxprep-dev.github.io/Waxprep-backend/terms.html"
+    PRIVACY_URL = "https://waxprep-dev.github.io/Waxprep-backend/terms.html"
 
     LEVEL_THRESHOLDS = {
         1: 0, 2: 500, 3: 1200, 4: 2500, 5: 4500,
