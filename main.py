@@ -286,121 +286,119 @@ async def process_paystack_event(body_data: dict):
 
 
 async def handle_successful_payment(payment_data: dict):
-"""Activates subscription or adds PAYG credits after successful Paystack payment."""
-from database.client import supabase
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-reference = payment_data.get('reference', '')
-amount_kobo = payment_data.get('amount', 0)
-amount_naira = amount_kobo // 100
-metadata = payment_data.get('metadata', {})
+    """Activates subscription or adds PAYG credits after successful Paystack payment."""
+    from database.client import supabase
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    reference = payment_data.get('reference', '')
+    amount_kobo = payment_data.get('amount', 0)
+    amount_naira = amount_kobo // 100
+    metadata = payment_data.get('metadata', {})
 
-student_id = metadata.get('student_id')
-plan = metadata.get('plan', 'scholar').lower()
-billing_period = metadata.get('billing_period', 'monthly').lower()
-payg_questions = metadata.get('payg_questions', 0)
+    student_id = metadata.get('student_id')
+    plan = metadata.get('plan', 'scholar').lower()
+    billing_period = metadata.get('billing_period', 'monthly').lower()
+    payg_questions = metadata.get('payg_questions', 0)
 
-print(f"Payment confirmed: {reference} | N{amount_naira} | {plan} {billing_period}")
+    print(f"Payment confirmed: {reference} | N{amount_naira} | {plan} {billing_period}")
 
-if not student_id:
-    print(f"Payment {reference} has no student_id in metadata")
-    return
+    if not student_id:
+        print(f"Payment {reference} has no student_id in metadata")
+        return
 
-now = datetime.now(ZoneInfo("Africa/Lagos"))
-
-try:
-    supabase.table('payments').insert({
-        'student_id': student_id,
-        'amount_naira': amount_naira,
-        'paystack_reference': reference,
-        'status': 'completed',
-        'completed_at': now.isoformat(),
-        'metadata': metadata,
-    }).execute()
-except Exception as e:
-    print(f"Payment record error: {e}")
-
-student_result = supabase.table('students').select('name').eq('id', student_id).execute()
-phone_result = supabase.table('platform_sessions').select('platform_user_id')\
-    .eq('student_id', student_id).eq('platform', 'whatsapp').execute()
-
-student_name = student_result.data[0]['name'].split()[0] if student_result.data else 'Student'
-student_phone = phone_result.data[0]['platform_user_id'] if phone_result.data else None
-
-if plan == 'payg' and payg_questions > 0:
-    try:
-        current = supabase.table('students')\
-            .select('payg_questions_remaining')\
-            .eq('id', student_id).execute()
-        current_remaining = 0
-        if current.data:
-            current_remaining = current.data[0].get('payg_questions_remaining', 0) or 0
-
-        supabase.table('students').update({
-            'payg_questions_remaining': current_remaining + payg_questions,
-            'updated_at': now.isoformat(),
-        }).eq('id', student_id).execute()
-
-        if student_phone:
-            from whatsapp.sender import send_whatsapp_message
-            await send_whatsapp_message(
-                student_phone,
-                f"Payment Confirmed, {student_name}!\n\n"
-                f"{payg_questions} question credits have been added to your account.\n\n"
-                f"You now have {current_remaining + payg_questions} credits available.\n\n"
-                "Ask me any question to use them!"
-            )
-
-        print(f"PAYG credits added: {payg_questions} for student {student_id}")
-
-    except Exception as e:
-        print(f"PAYG activation error: {e}")
-
-else:
-    duration_days = 365 if billing_period == 'yearly' else 30
-    expires = now + timedelta(days=duration_days)
+    now = datetime.now(ZoneInfo("Africa/Lagos"))
 
     try:
-        supabase.table('students').update({
-            'subscription_tier': plan,
-            'subscription_expires_at': expires.isoformat(),
-            'is_trial_active': False,
-            'updated_at': now.isoformat(),
-        }).eq('id', student_id).execute()
-
-        supabase.table('subscriptions').insert({
+        supabase.table('payments').insert({
             'student_id': student_id,
-            'tier': plan,
-            'billing_period': billing_period,
             'amount_naira': amount_naira,
-            'started_at': now.isoformat(),
-            'expires_at': expires.isoformat(),
-            'is_active': True,
+            'paystack_reference': reference,
+            'status': 'completed',
+            'completed_at': now.isoformat(),
+            'metadata': metadata,
         }).execute()
-
-        if student_phone:
-            from whatsapp.sender import send_whatsapp_message
-            await send_whatsapp_message(
-                student_phone,
-                f"Payment Confirmed, {student_name}!\n\n"
-                f"Welcome to {plan.capitalize()} Plan!\n"
-                f"Active until {expires.strftime('%d %B %Y')}.\n\n"
-                "You now have full access to all features.\n\n"
-                "What do you want to study first?"
-            )
-
-        print(f"Subscription activated for student {student_id}")
-
     except Exception as e:
-        print(f"Payment activation error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Payment record error: {e}")
+
+    student_result = supabase.table('students').select('name').eq('id', student_id).execute()
+    phone_result = supabase.table('platform_sessions').select('platform_user_id')\
+        .eq('student_id', student_id).eq('platform', 'whatsapp').execute()
+
+    student_name = student_result.data[0]['name'].split()[0] if student_result.data else 'Student'
+    student_phone = phone_result.data[0]['platform_user_id'] if phone_result.data else None
+
+    if plan == 'payg' and payg_questions > 0:
+        try:
+            current = supabase.table('students')\
+                .select('payg_questions_remaining')\
+                .eq('id', student_id).execute()
+            current_remaining = 0
+            if current.data:
+                current_remaining = current.data[0].get('payg_questions_remaining', 0) or 0
+
+            supabase.table('students').update({
+                'payg_questions_remaining': current_remaining + payg_questions,
+                'updated_at': now.isoformat(),
+            }).eq('id', student_id).execute()
+
+            if student_phone:
+                from whatsapp.sender import send_whatsapp_message
+                await send_whatsapp_message(
+                    student_phone,
+                    f"Payment Confirmed, {student_name}!\n\n"
+                    f"{payg_questions} question credits have been added to your account.\n\n"
+                    f"You now have {current_remaining + payg_questions} credits available.\n\n"
+                    "Ask me any question to use them!"
+                )
+
+            print(f"PAYG credits added: {payg_questions} for student {student_id}")
+
+        except Exception as e:
+            print(f"PAYG activation error: {e}")
+
+    else:
+        duration_days = 365 if billing_period == 'yearly' else 30
+        expires = now + timedelta(days=duration_days)
+
+        try:
+            supabase.table('students').update({
+                'subscription_tier': plan,
+                'subscription_expires_at': expires.isoformat(),
+                'is_trial_active': False,
+                'updated_at': now.isoformat(),
+            }).eq('id', student_id).execute()
+
+            supabase.table('subscriptions').insert({
+                'student_id': student_id,
+                'tier': plan,
+                'billing_period': billing_period,
+                'amount_naira': amount_naira,
+                'started_at': now.isoformat(),
+                'expires_at': expires.isoformat(),
+                'is_active': True,
+            }).execute()
+
+            if student_phone:
+                from whatsapp.sender import send_whatsapp_message
+                await send_whatsapp_message(
+                    student_phone,
+                    f"Payment Confirmed, {student_name}!\n\n"
+                    f"Welcome to {plan.capitalize()} Plan!\n"
+                    f"Active until {expires.strftime('%d %B %Y')}.\n\n"
+                    "You now have full access to all features.\n\n"
+                    "What do you want to study first?"
+                )
+
+            print(f"Subscription activated for student {student_id}")
+
+        except Exception as e:
+            print(f"Payment activation error: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 # ============================================================
 # ADMIN API ENDPOINTS
-# These are HTTP endpoints for programmatic admin access.
-# The WhatsApp admin commands are handled in admin/dashboard.py
 # ============================================================
 
 @app.get("/admin/stats")
