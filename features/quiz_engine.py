@@ -11,10 +11,6 @@ from database.client import supabase
 from config.settings import settings
 
 
-# ============================================================
-# QUESTION SELECTION
-# ============================================================
-
 async def get_question_for_student(
     student_id: str,
     subject: str,
@@ -27,7 +23,6 @@ async def get_question_for_student(
     """
     elo = await get_student_elo(student_id, subject, topic or '')
 
-    # Convert Elo to difficulty range
     if elo < 900:
         diff_min, diff_max = 1, 3
     elif elo < 1100:
@@ -39,7 +34,6 @@ async def get_question_for_student(
     else:
         diff_min, diff_max = 8, 10
 
-    # Get recently seen question IDs to avoid repeats
     seen_ids = await get_student_recently_seen_questions(student_id)
 
     query = supabase.table('questions')\
@@ -57,7 +51,6 @@ async def get_question_for_student(
     result = query.order('quality_score', desc=True).limit(15).execute()
     questions = result.data or []
 
-    # Filter out recently seen
     if seen_ids and questions:
         questions = [q for q in questions if str(q.get('id', '')) not in seen_ids]
 
@@ -65,7 +58,6 @@ async def get_question_for_student(
         random.shuffle(questions)
         return questions[0]
 
-    # No questions in bank — generate with AI
     if topic:
         try:
             from ai.gemini_client import generate_questions_with_gemini
@@ -119,14 +111,32 @@ async def update_mastery_after_answer(
     question_difficulty: int,
     is_correct: bool
 ):
-    """Updates mastery score and Elo after a student answers a question."""
-    from datetime import datetime
+    """
+    Updates mastery score, Elo, and next review date after a student answers a question.
+    FIXED: Now correctly calculates and updates next_review_at for spaced repetition.
+    """
+    from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
 
-    now = datetime.now(ZoneInfo("Africa/Lagos")).isoformat()
+    now = datetime.now(ZoneInfo("Africa/Lagos"))
+    now_iso = now.isoformat()
+
     current_elo = await get_student_elo(student_id, subject, topic)
     new_elo = calculate_new_elo(current_elo, question_difficulty, is_correct)
     mastery_score = min(100, max(0, (new_elo - 400) / 16))
+
+    # FIXED: Calculate next review date based on mastery score
+    # This makes the spaced repetition scheduler work correctly
+    if mastery_score < 40:
+        next_review_days = 1
+    elif mastery_score < 60:
+        next_review_days = 3
+    elif mastery_score < 80:
+        next_review_days = 7
+    else:
+        next_review_days = 14
+
+    next_review_at = (now + timedelta(days=next_review_days)).isoformat()
 
     try:
         existing = supabase.table('mastery_scores')\
@@ -146,8 +156,9 @@ async def update_mastery_after_answer(
                 'mastery_score': round(mastery_score, 2),
                 'questions_attempted': new_attempted,
                 'questions_correct': new_correct,
-                'last_studied_at': now,
-                'updated_at': now,
+                'last_studied_at': now_iso,
+                'next_review_at': next_review_at,
+                'updated_at': now_iso,
             }).eq('id', existing.data[0]['id']).execute()
         else:
             supabase.table('mastery_scores').insert({
@@ -158,7 +169,8 @@ async def update_mastery_after_answer(
                 'mastery_score': round(mastery_score, 2),
                 'questions_attempted': 1,
                 'questions_correct': 1 if is_correct else 0,
-                'last_studied_at': now,
+                'last_studied_at': now_iso,
+                'next_review_at': next_review_at,
             }).execute()
 
     except Exception as e:
@@ -179,7 +191,7 @@ def format_question_for_whatsapp(question: dict, question_number: int = 1) -> st
     stars = '⭐' * min(5, max(1, difficulty // 2))
 
     return (
-        f"❓ *Question {question_number}* {stars}\n"
+        f"Question {question_number} {stars}\n"
         f"_{subject} — {topic}_\n\n"
         f"{q_text}\n\n"
         f"*A.* {a}\n"
@@ -204,7 +216,6 @@ def evaluate_quiz_answer(
 
     student_ans = student_answer.strip().upper()
 
-    # Parse the answer
     answer_map = {'A': 'A', 'B': 'B', 'C': 'C', 'D': 'D'}
     actual_answer = None
 
@@ -239,23 +250,23 @@ def evaluate_quiz_answer(
     )
 
     almost_messages = [
-        "Almost! You were right about part of it 💪",
+        "Almost! You were right about part of it",
         "Close — you're thinking about it the right way, just one piece shifted",
         "Good thinking — let me show you where it went a slightly different direction",
-        "You're on the right track! Small adjustment needed 🎯",
+        "You're on the right track! Small adjustment needed",
     ]
 
     correct_messages = [
-        "Excellent! That's exactly right! 🎉",
-        "Perfect! You nailed it! ⭐",
-        "Correct! Outstanding! 🏆",
-        "That's exactly it! Well done! 🌟",
+        "Excellent! That's exactly right!",
+        "Perfect! You nailed it!",
+        "Correct! Outstanding!",
+        "That's exactly it! Well done!",
     ]
 
     if is_correct:
         feedback = f"{random.choice(correct_messages)}\n\n*Correct: {correct}. {correct_text}*\n\n"
         if correct_explanation:
-            feedback += f"💡 *Why?*\n{correct_explanation}"
+            feedback += f"*Why?*\n{correct_explanation}"
     else:
         wrong_explanation = question.get(f'explanation_{actual_answer.lower()}', '')
         feedback = (
@@ -264,9 +275,9 @@ def evaluate_quiz_answer(
             f"Correct: *{correct}. {correct_text}*\n\n"
         )
         if correct_explanation:
-            feedback += f"💡 *Why {correct} is correct:*\n{correct_explanation}\n\n"
+            feedback += f"*Why {correct} is correct:*\n{correct_explanation}\n\n"
         if wrong_explanation:
-            feedback += f"❌ *Why {actual_answer} is wrong:*\n{wrong_explanation}"
+            feedback += f"*Why {actual_answer} is wrong:*\n{wrong_explanation}"
 
     return is_correct, feedback
 
@@ -300,7 +311,6 @@ async def calculate_and_award_points(
     except Exception as e:
         print(f"Points award error: {e}")
 
-    # Check for milestone badges
     badge = None
     try:
         student_result = supabase.table('students')\
@@ -309,8 +319,12 @@ async def calculate_and_award_points(
 
         if student_result.data:
             total = student_result.data[0].get('total_questions_answered', 0)
-            badge_map = {1: 'FIRST_QUESTION', 100: 'QUESTIONS_100',
-                        500: 'QUESTIONS_500', 1000: 'QUESTIONS_1000'}
+            badge_map = {
+                1: 'FIRST_QUESTION',
+                100: 'QUESTIONS_100',
+                500: 'QUESTIONS_500',
+                1000: 'QUESTIONS_1000',
+            }
 
             if total in badge_map:
                 badge = await _award_badge_internal(student_id, badge_map[total])
@@ -419,7 +433,6 @@ def extract_topic_from_message(message: str) -> str | None:
     """Extracts a specific topic from a message like 'quiz me on Newton's Laws in Physics'."""
     import re
 
-    # Look for "on [topic]" or "about [topic]" patterns
     patterns = [
         r'(?:quiz\s+(?:me\s+)?on|test\s+(?:me\s+)?on|about|regarding|on)\s+(?:the\s+)?([A-Za-z\'s\s]+?)(?:\s+in\s+\w+|$|\?)',
     ]
@@ -428,7 +441,6 @@ def extract_topic_from_message(message: str) -> str | None:
         match = re.search(pattern, message, re.IGNORECASE)
         if match:
             topic = match.group(1).strip()
-            # Don't return if it's just a subject name
             if len(topic) > 3 and topic.lower() not in [
                 'physics', 'chemistry', 'biology', 'mathematics', 'english',
                 'economics', 'government', 'geography', 'commerce', 'history'
