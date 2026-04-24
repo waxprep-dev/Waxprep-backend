@@ -14,7 +14,7 @@ what percentage got it right, who won.
 """
 
 from database.client import supabase
-from utils.helpers import nigeria_today, nigeria_now, get_correct_message, get_almost_message
+from helpers import nigeria_today, nigeria_now, get_correct_message, get_almost_message
 
 async def get_todays_challenge() -> dict | None:
     """Returns today's challenge question."""
