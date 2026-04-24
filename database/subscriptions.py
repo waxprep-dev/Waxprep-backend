@@ -1,8 +1,9 @@
 """
 Subscription Database Operations
-Fixes: proper email handling, PAYG support, better error messages
+Fixes: proper email handling, PAYG support, callback_url added, amount verification
 """
 from config.settings import settings
+
 
 async def create_subscription(
     student_id: str,
@@ -58,6 +59,7 @@ async def create_subscription(
 
     return result.data[0] if result.data else None
 
+
 async def get_active_subscription(student_id: str) -> dict | None:
     """Gets the currently active subscription for a student."""
     from database.client import supabase
@@ -70,6 +72,7 @@ async def get_active_subscription(student_id: str) -> dict | None:
         .execute()
     return result.data[0] if result.data else None
 
+
 async def generate_paystack_payment_link(
     student: dict,
     tier: str,
@@ -77,10 +80,10 @@ async def generate_paystack_payment_link(
 ) -> str:
     """
     Generates a Paystack payment link for a student.
-    FIXED: Uses WAX ID as email prefix to avoid Paystack email issues.
     """
     import httpx
     import time
+
     price_map = {
         ('scholar', 'monthly'): settings.SCHOLAR_MONTHLY,
         ('scholar', 'yearly'): settings.SCHOLAR_YEARLY,
@@ -111,7 +114,7 @@ async def generate_paystack_payment_link(
         "email": student_email,
         "amount": amount_naira * 100,
         "reference": reference,
-        "callback_url": f"https://waxprep.ng/payment/success?ref={reference}",
+        "callback_url": f"https://waxprep-dev.github.io/Waxprep-backend/payment_success.html?ref={reference}",
         "metadata": {
             "student_id": student['id'],
             "wax_id": student['wax_id'],
@@ -119,6 +122,7 @@ async def generate_paystack_payment_link(
             "billing_period": billing_period,
             "phone": phone,
             "student_name": student.get('name', ''),
+            "amount_naira": amount_naira,
             "custom_fields": [
                 {
                     "display_name": "Student Name",
@@ -163,6 +167,7 @@ async def generate_paystack_payment_link(
         else:
             raise Exception(f"Paystack initialization failed: {data.get('message', 'Unknown error')}")
 
+
 async def generate_payg_payment_link(
     student: dict,
     package: str
@@ -170,9 +175,11 @@ async def generate_payg_payment_link(
     """
     Generates a Pay-As-You-Go payment link for question credits.
     Packages: '100', '250', '500'
+    FIXED: Added callback_url so students can return after payment.
     """
     import httpx
     import time
+
     package_map = {
         '100': settings.PAYG_100_QUESTIONS,
         '250': settings.PAYG_250_QUESTIONS,
@@ -192,12 +199,14 @@ async def generate_payg_payment_link(
         "email": student_email,
         "amount": amount_naira * 100,
         "reference": reference,
+        "callback_url": f"https://waxprep-dev.github.io/Waxprep-backend/payment_success.html?ref={reference}",
         "metadata": {
             "student_id": student['id'],
             "wax_id": student['wax_id'],
             "plan": 'payg',
             "payg_questions": int(package),
             "billing_period": 'one_time',
+            "amount_naira": amount_naira,
         },
         "channels": ["card", "bank", "ussd", "qr", "mobile_money", "bank_transfer"],
         "currency": "NGN",
@@ -207,6 +216,9 @@ async def generate_payg_payment_link(
         "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
         "Content-Type": "application/json",
     }
+
+    if not settings.PAYSTACK_SECRET_KEY:
+        raise Exception("Paystack secret key not configured.")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
@@ -221,6 +233,7 @@ async def generate_payg_payment_link(
             return data['data']['authorization_url']
         else:
             raise Exception(f"PAYG link failed: {data.get('message', 'Unknown error')}")
+
 
 async def verify_paystack_payment(reference: str) -> dict:
     """Verifies a payment with Paystack."""
