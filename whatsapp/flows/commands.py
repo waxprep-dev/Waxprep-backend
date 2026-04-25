@@ -2,33 +2,37 @@
 Command Handler
 
 Handles all direct commands: PROGRESS, HELP, SUBSCRIBE, STREAK, etc.
+FIXED: Added PAYG to the handlers dict (it was defined but not routed).
 ALL imports are lazy.
 """
 
-HELP_MESSAGE = """📚 *WaxPrep Commands*
+HELP_MESSAGE = """*WaxPrep Commands*
 
 *Study:*
-📖 *LEARN [topic]* — Explain a topic
-❓ *QUIZ [subject]* — Get quizzed
-📝 *EXAM* — Mock exam mode
-🔄 *REVISION* — Review weak topics
-⚔️ *CHALLENGE* — Daily challenge
-⏸️ *PAUSE / CONTINUE* — Pause session
-⏹️ *STOP* — End session
+LEARN [topic] — Explain a topic
+QUIZ [subject] — Get quizzed
+EXAM — Mock exam mode
+REVISION — Review weak topics
+CHALLENGE — Daily challenge
+PAUSE / CONTINUE — Pause session
+STOP — End session
 
 *Account:*
-📊 *PROGRESS* — Your stats
-🆔 *MYID* — Your WAX ID
-🔥 *STREAK* — Study streak
-📋 *PLAN* — Study plan
-💰 *BALANCE* — Questions left today
-🏅 *BADGES* — Your badges
-👥 *REFERRAL* — Referral code
+PROGRESS — Your stats
+MYID — Your WAX ID
+STREAK — Study streak
+PLAN — Study plan
+BALANCE — Questions left today
+BADGES — Your badges
+REFERRAL — Referral code
 
-*Other:*
-💳 *SUBSCRIBE* — Upgrade plan
-🎁 *PROMO [code]* — Apply promo code
-❓ *HELP* — This message"""
+*Payments:*
+SUBSCRIBE — Upgrade plan
+PAYG 100 — Buy 100 question credits (N500)
+PAYG 250 — Buy 250 question credits (N1,000)
+PAYG 500 — Buy 500 question credits (N1,800)
+PROMO [code] — Apply promo code
+HELP — This message"""
 
 
 async def handle_command(phone: str, student: dict, conversation: dict, message: str, command: str):
@@ -49,6 +53,8 @@ async def handle_command(phone: str, student: dict, conversation: dict, message:
         'REFERRAL': handle_referral,
         'PAUSE': handle_pause,
         'CONTINUE': handle_continue,
+        # FIXED: PAYG was defined as a function but never added to this routing dict
+        'PAYG': handle_payg,
     }
 
     handler = handlers.get(command)
@@ -62,6 +68,7 @@ async def handle_payg(phone: str, student: dict, conversation: dict, message: st
     """Handles Pay-As-You-Go question credit purchases."""
     from whatsapp.sender import send_whatsapp_message
     from config.settings import settings
+
     parts = message.strip().upper().split()
     package = parts[1] if len(parts) > 1 else None
 
@@ -131,13 +138,13 @@ async def handle_my_id(phone: str, student: dict, conversation: dict, message: s
 
     await send_whatsapp_message(
         phone,
-        f"🆔 *Your WAX ID, {name}*\n\n"
+        f"Your WAX ID, {name}\n\n"
         f"*{wax_id}*\n\n"
         "Use this to:\n"
-        "• Log in on any device\n"
-        "• Recover your account\n"
-        "• Share with friends for referral rewards\n\n"
-        "_Keep it safe!_"
+        "Log in on any device\n"
+        "Recover your account\n"
+        "Share with friends for referral rewards\n\n"
+        "Keep it safe!"
     )
 
 
@@ -152,20 +159,20 @@ async def handle_streak(phone: str, student: dict, conversation: dict, message: 
     name = student.get('name', 'Student').split()[0]
     studied_today = last_study == today
 
-    emoji = '🔥' if streak > 0 else '❄️'
+    emoji = 'ON FIRE' if streak > 0 else 'START TODAY'
 
     msg = (
-        f"{emoji} *{name}'s Streak*\n\n"
+        f"*{name}'s Streak*\n\n"
         f"Current: *{streak} day{'s' if streak != 1 else ''}*\n"
         f"Best Ever: *{longest} day{'s' if longest != 1 else ''}*\n\n"
     )
 
     if studied_today:
-        msg += "✅ Studied today — streak safe! 💪"
+        msg += "Studied today — streak safe!"
     elif streak > 0:
-        msg += f"⚠️ Haven't studied today yet!\nStudy at least 1 question to keep your {streak}-day streak!"
+        msg += f"Haven't studied today yet!\nStudy at least 1 question to keep your {streak}-day streak!"
     else:
-        msg += "Start studying today to build a streak! 🚀"
+        msg += "Start studying today to build a streak!"
 
     await send_whatsapp_message(phone, msg)
 
@@ -195,14 +202,14 @@ async def handle_balance(phone: str, student: dict, conversation: dict, message:
     remaining = max(0, limit - questions_today)
 
     if limit >= 9999:
-        limit_display = "Unlimited ♾️"
-        remaining_display = "Unlimited ♾️"
+        limit_display = "Unlimited"
+        remaining_display = "Unlimited"
     else:
         limit_display = str(limit)
         remaining_display = str(remaining)
 
     msg = (
-        f"💰 *Question Balance*\n\n"
+        f"*Question Balance*\n\n"
         f"Plan: {status['display_tier']}\n"
         f"Daily Limit: {limit_display}\n"
         f"Used Today: {questions_today}\n"
@@ -213,8 +220,8 @@ async def handle_balance(phone: str, student: dict, conversation: dict, message:
         msg += (
             f"You've used all your free questions today.\n\n"
             f"Upgrade to Scholar for {format_naira(settings.SCHOLAR_MONTHLY)}/month "
-            f"— 60 questions daily!\n\n"
-            "Type *SUBSCRIBE* to upgrade."
+            f"— 100 questions daily!\n\n"
+            "Type SUBSCRIBE to upgrade, or PAYG 100 to buy 100 credits now."
         )
 
     await send_whatsapp_message(phone, msg)
@@ -238,7 +245,7 @@ async def handle_plan(phone: str, student: dict, conversation: dict, message: st
     if not result.data:
         await send_whatsapp_message(
             phone,
-            "No study plan yet! 📋\n\n"
+            "No study plan yet!\n\n"
             "Type *PLAN CREATE* to generate your personalized plan,\n"
             "or just start studying and I'll build one based on how you learn."
         )
@@ -250,11 +257,11 @@ async def handle_plan(phone: str, student: dict, conversation: dict, message: st
 
         await send_whatsapp_message(
             phone,
-            f"📋 *Your Study Plan*\n\n"
+            f"*Your Study Plan*\n\n"
             f"Daily Target: {daily_target} questions\n"
             f"Focus: {subjects_str}\n\n"
-            f"_Your plan updates weekly based on your progress._\n\n"
-            f"Ready? Ask me any question or type *QUIZ [subject]* to start! 🚀"
+            f"Your plan updates weekly based on your progress.\n\n"
+            f"Ready? Ask me any question or type *QUIZ [subject]* to start!"
         )
 
 
@@ -277,7 +284,7 @@ async def handle_promo_code(phone: str, student: dict, conversation: dict, messa
         .eq('code', code).eq('is_active', True).execute()
 
     if not result.data:
-        await send_whatsapp_message(phone, f"❌ Code *{code}* is not valid or has expired.")
+        await send_whatsapp_message(phone, f"Code *{code}* is not valid or has expired.")
         return
 
     promo = result.data[0]
@@ -287,13 +294,13 @@ async def handle_promo_code(phone: str, student: dict, conversation: dict, messa
         try:
             exp = datetime.fromisoformat(promo['expires_at'].replace('Z', '+00:00'))
             if exp < nigeria_now():
-                await send_whatsapp_message(phone, f"❌ Code *{code}* has expired.")
+                await send_whatsapp_message(phone, f"Code *{code}* has expired.")
                 return
         except Exception:
             pass
 
     if promo.get('max_uses') and promo.get('current_uses', 0) >= promo['max_uses']:
-        await send_whatsapp_message(phone, f"❌ Code *{code}* has reached its usage limit.")
+        await send_whatsapp_message(phone, f"Code *{code}* has reached its usage limit.")
         return
 
     existing = supabase.table('promo_code_uses').select('id')\
@@ -315,7 +322,7 @@ async def handle_promo_code(phone: str, student: dict, conversation: dict, messa
         'current_uses': promo.get('current_uses', 0) + 1
     }).eq('id', promo['id']).execute()
 
-    await send_whatsapp_message(phone, f"✅ *Code Applied: {code}*\n\n{benefit_msg}")
+    await send_whatsapp_message(phone, f"*Code Applied: {code}*\n\n{benefit_msg}")
 
 
 async def _apply_promo_benefit(student: dict, promo: dict) -> str:
@@ -344,7 +351,7 @@ async def _apply_promo_benefit(student: dict, promo: dict) -> str:
             'is_trial_active': True
         })
         return (
-            f"🎁 *+{bonus_days} extra trial days!*\n\n"
+            f"+{bonus_days} extra trial days!\n\n"
             f"Trial now expires: {new_end.strftime('%d %B %Y')}\n\n"
             "Enjoy full access to all WaxPrep features!"
         )
@@ -352,7 +359,7 @@ async def _apply_promo_benefit(student: dict, promo: dict) -> str:
     elif code_type == 'discount_percent':
         discount = promo.get('discount_percent', 10)
         return (
-            f"💰 *{discount}% discount* on your next subscription!\n\n"
+            f"{discount}% discount on your next subscription!\n\n"
             "Type *SUBSCRIBE* to use your discount."
         )
 
@@ -365,7 +372,7 @@ async def _apply_promo_benefit(student: dict, promo: dict) -> str:
             'subscription_expires_at': new_expires.isoformat()
         })
         return (
-            f"⭐ *Upgraded to {tier.capitalize()} Plan* for {days} days!\n\n"
+            f"Upgraded to {tier.capitalize()} Plan for {days} days!\n\n"
             f"Expires: {new_expires.strftime('%d %B %Y')}"
         )
 
@@ -374,9 +381,9 @@ async def _apply_promo_benefit(student: dict, promo: dict) -> str:
         days = promo.get('bonus_days', 7)
         from database.client import redis_client
         redis_client.setex(f"bonus_questions:{student_id}", days * 86400, str(bonus))
-        return f"❓ *+{bonus} extra questions per day* for {days} days!"
+        return f"+{bonus} extra questions per day for {days} days!"
 
-    return "✅ Promo code applied successfully!"
+    return "Promo code applied successfully!"
 
 
 async def handle_stop(phone: str, student: dict, conversation: dict, message: str):
@@ -390,10 +397,10 @@ async def handle_stop(phone: str, student: dict, conversation: dict, message: st
 
     await send_whatsapp_message(
         phone,
-        f"Session ended, {name}! 👋\n\n"
-        f"🔥 Streak: {streak} day{'s' if streak != 1 else ''}\n\n"
+        f"Session ended, {name}!\n\n"
+        f"Streak: {streak} day{'s' if streak != 1 else ''}\n\n"
         "Great work. Come back and study more later!\n\n"
-        "_Type anything to start a new session._"
+        "Type anything to start a new session."
     )
 
 
@@ -402,17 +409,17 @@ async def handle_modes(phone: str, student: dict, conversation: dict, message: s
 
     await send_whatsapp_message(
         phone,
-        "📚 *Study Modes*\n\n"
-        "📖 *LEARN [topic]* — Deep explanation\n"
-        "   _e.g. Learn Newton's Laws_\n\n"
-        "❓ *QUIZ [subject]* — Test yourself\n"
-        "   _e.g. Quiz me on Chemistry_\n\n"
-        "📝 *EXAM* — Timed mock exam\n"
-        "   _Full exam simulation_\n\n"
-        "🔄 *REVISION* — Review weak areas\n"
-        "   _Spaced repetition mode_\n\n"
-        "⚔️ *CHALLENGE* — Today's hard question\n\n"
-        "_Or just ask me any question directly!_ 😊"
+        "*Study Modes*\n\n"
+        "LEARN [topic] — Deep explanation\n"
+        "   e.g. Learn Newton's Laws\n\n"
+        "QUIZ [subject] — Test yourself\n"
+        "   e.g. Quiz me on Chemistry\n\n"
+        "EXAM — Timed mock exam\n"
+        "   Full exam simulation\n\n"
+        "REVISION — Review weak areas\n"
+        "   Spaced repetition mode\n\n"
+        "CHALLENGE — Today's hard question\n\n"
+        "Or just ask me any question directly!"
     )
 
 
@@ -428,9 +435,9 @@ async def handle_badges(phone: str, student: dict, conversation: dict, message: 
     if not result.data:
         await send_whatsapp_message(
             phone,
-            "🏅 *Your Badges*\n\n"
+            "*Your Badges*\n\n"
             "No badges yet!\n\n"
-            "Your first badge comes after your very first question. Ask me anything to earn it! 🌟"
+            "Your first badge comes after your very first question. Ask me anything to earn it!"
         )
         return
 
@@ -439,15 +446,15 @@ async def handle_badges(phone: str, student: dict, conversation: dict, message: 
         badge = entry.get('badges', {})
         if not badge:
             continue
-        emoji = badge.get('icon_emoji', '🏅')
+        emoji = badge.get('icon_emoji', '')
         rarity = badge.get('rarity', 'common').upper()
         badges_text += f"{emoji} *{badge['name']}* _({rarity})_\n   {badge['description']}\n\n"
 
     await send_whatsapp_message(
         phone,
-        f"🏅 *Your Badges ({len(result.data)} earned)*\n\n"
+        f"*Your Badges ({len(result.data)} earned)*\n\n"
         f"{badges_text}"
-        "_Keep studying to unlock more!_ 💪"
+        "Keep studying to unlock more!"
     )
 
 
@@ -459,14 +466,14 @@ async def handle_referral(phone: str, student: dict, conversation: dict, message
 
     await send_whatsapp_message(
         phone,
-        f"👥 *Your Referral Code*\n\n"
+        f"*Your Referral Code*\n\n"
         f"*{code}*\n\n"
         f"You've referred *{count}* student{'s' if count != 1 else ''}!\n\n"
         f"*Rewards:*\n"
         f"3 referrals = 7 days Pro FREE\n"
         f"10 referrals = 1 month Pro FREE\n"
         f"25 referrals = 1 year Scholar FREE\n\n"
-        f"_Share your code! Friends type_ *PROMO {code}* _when signing up._"
+        f"Share your code! Friends type *PROMO {code}* when signing up."
     )
 
 
@@ -479,8 +486,8 @@ async def handle_pause(phone: str, student: dict, conversation: dict, message: s
 
     await send_whatsapp_message(
         phone,
-        f"⏸️ Session paused, {name}.\n\n"
-        "Type *CONTINUE* to pick up right where you left off. ▶️"
+        f"Session paused, {name}.\n\n"
+        "Type *CONTINUE* to pick up right where you left off."
     )
 
 
@@ -496,12 +503,12 @@ async def handle_continue(phone: str, student: dict, conversation: dict, message
     if topic:
         await send_whatsapp_message(
             phone,
-            f"▶️ Session resumed!\n\n"
+            f"Session resumed!\n\n"
             f"We were studying *{topic}* in {subject}.\n\n"
-            "Where were we? Ask me anything to continue."
+            "Ask me anything to continue."
         )
     else:
         await send_whatsapp_message(
             phone,
-            "▶️ Session resumed! What would you like to study?"
+            "Session resumed! What would you like to study?"
         )
