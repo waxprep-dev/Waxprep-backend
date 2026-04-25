@@ -22,12 +22,9 @@ class Settings:
     GROQ_FAST_MODEL = "llama-3.1-8b-instant"
     GROQ_SMART_MODEL = "llama-3.3-70b-versatile"
 
-    # FIXED: gemini-2.0-flash has limit:0 on free tier in this project.
-    # gemini-1.5-flash has 1500 requests/day free tier confirmed.
-    # gemini-1.5-flash-8b is the most generous free tier option.
-    GEMINI_MODEL = "gemini-1.5-flash"
-    GEMINI_PRO_MODEL = "gemini-1.5-pro"
-    GEMINI_FAST_MODEL = "gemini-1.5-flash-8b"
+    GEMINI_MODEL = "gemini-1.5-flash-latest"
+    GEMINI_PRO_MODEL = "gemini-1.5-pro-latest"
+    GEMINI_FAST_MODEL = "gemini-1.5-flash-8b-latest"
 
     OPENAI_VISION_MODEL = "gpt-4o-mini"
 
