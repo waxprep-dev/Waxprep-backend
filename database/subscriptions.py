@@ -1,141 +1,194 @@
 """
 Subscription Database Operations
-Fixes: proper email handling, PAYG support, callback_url added, amount verification
+Includes full discount code validation before payment link generation.
 """
+
 from config.settings import settings
 
 
-async def create_subscription(
-    student_id: str,
+async def validate_promo_code_for_payment(
+    code: str,
+    student: dict,
     tier: str,
     billing_period: str,
-    amount_naira: int,
-    paystack_reference: str = None,
-    promo_code: str = None,
-    discount_applied: int = 0
 ) -> dict:
-    """Creates a new subscription record for a student."""
+    """
+    Validates a promo code and calculates the discounted price.
+    Returns dict with: valid, discount_percent, final_amount, original_amount,
+                       promo_id, error_message.
+    """
     from database.client import supabase
     from helpers import nigeria_now
-    from datetime import timedelta
-    now = nigeria_now()
+    from datetime import datetime
 
-    if billing_period == 'yearly':
-        duration_days = 365
-    else:
-        duration_days = 30
-
-    expires_at = now + timedelta(days=duration_days)
-    grace_period_end = expires_at + timedelta(days=settings.GRACE_PERIOD_DAYS)
-
-    subscription_data = {
-        'student_id': student_id,
-        'tier': tier,
-        'billing_period': billing_period,
-        'amount_naira': amount_naira,
-        'started_at': now.isoformat(),
-        'expires_at': expires_at.isoformat(),
-        'is_active': True,
-        'promo_code_used': promo_code,
-        'discount_applied': discount_applied,
-        'grace_period_ends_at': grace_period_end.isoformat(),
+    original_amount = settings.get_price_for_tier(tier, billing_period)
+    base_result = {
+        'valid': False,
+        'discount_percent': 0,
+        'final_amount': original_amount,
+        'original_amount': original_amount,
+        'promo_id': None,
+        'error_message': None,
+        'code_type': None,
     }
 
-    supabase.table('subscriptions')\
-        .update({'is_active': False})\
-        .eq('student_id', student_id)\
-        .eq('is_active', True)\
-        .execute()
+    if not code or not code.strip():
+        return base_result
 
-    result = supabase.table('subscriptions').insert(subscription_data).execute()
+    code = code.strip().upper()
 
-    if result.data:
-        supabase.table('students').update({
-            'subscription_tier': tier,
-            'subscription_expires_at': expires_at.isoformat(),
-            'is_trial_active': False,
-            'updated_at': now.isoformat(),
-        }).eq('id', student_id).execute()
+    try:
+        result = supabase.table('promo_codes')\
+            .select('*')\
+            .eq('code', code)\
+            .eq('is_active', True)\
+            .execute()
 
-    return result.data[0] if result.data else None
+        if not result.data:
+            return {**base_result, 'error_message': f"Code *{code}* is not valid or has expired."}
+
+        promo = result.data[0]
+        now = nigeria_now()
+
+        # Check expiry
+        if promo.get('expires_at'):
+            try:
+                exp = datetime.fromisoformat(str(promo['expires_at']).replace('Z', '+00:00'))
+                if exp < now:
+                    return {**base_result, 'error_message': f"Code *{code}* has expired."}
+            except Exception:
+                pass
+
+        # Check usage limit
+        if promo.get('max_uses') and promo.get('current_uses', 0) >= promo['max_uses']:
+            return {**base_result, 'error_message': f"Code *{code}* has reached its usage limit."}
+
+        # Check if already used by this student
+        existing = supabase.table('promo_code_uses')\
+            .select('id')\
+            .eq('promo_code_id', promo['id'])\
+            .eq('student_id', student['id'])\
+            .execute()
+
+        if existing.data:
+            return {**base_result, 'error_message': f"You have already used code *{code}*."}
+
+        code_type = promo.get('code_type', '')
+
+        # Calculate discount for subscription payments
+        discount_percent = 0
+        final_amount = original_amount
+
+        if code_type == 'discount_percent':
+            discount_percent = promo.get('discount_percent', 0) or 0
+            discount_amount = int(original_amount * discount_percent / 100)
+            final_amount = max(100, original_amount - discount_amount)
+
+        elif code_type == 'full_trial':
+            # Trial codes don't discount subscription payments
+            # but can be noted as a bonus
+            discount_percent = 0
+            final_amount = original_amount
+
+        elif code_type == 'tier_upgrade':
+            # If upgrading to a specific tier and the code unlocks it free
+            if promo.get('tier_to_unlock', '').lower() == tier.lower():
+                discount_percent = 100
+                final_amount = 0
+            else:
+                discount_percent = 0
+
+        return {
+            'valid': True,
+            'discount_percent': discount_percent,
+            'final_amount': final_amount,
+            'original_amount': original_amount,
+            'promo_id': promo['id'],
+            'promo_data': promo,
+            'code_type': code_type,
+            'error_message': None,
+        }
+
+    except Exception as e:
+        print(f"Promo validation error: {e}")
+        return {**base_result, 'error_message': "Could not validate that code right now. Try again."}
 
 
-async def get_active_subscription(student_id: str) -> dict | None:
-    """Gets the currently active subscription for a student."""
+async def mark_promo_used(promo_id: str, student_id: str, context: dict = None):
+    """Marks a promo code as used by a student."""
     from database.client import supabase
-    result = supabase.table('subscriptions')\
-        .select('*')\
-        .eq('student_id', student_id)\
-        .eq('is_active', True)\
-        .order('created_at', desc=True)\
-        .limit(1)\
-        .execute()
-    return result.data[0] if result.data else None
+    try:
+        supabase.table('promo_code_uses').insert({
+            'promo_code_id': promo_id,
+            'student_id': student_id,
+            'benefit_applied': context or {},
+        }).execute()
+
+        supabase.table('promo_codes').update({
+            'current_uses': supabase.table('promo_codes')\
+                .select('current_uses').eq('id', promo_id).execute().data[0].get('current_uses', 0) + 1
+        }).eq('id', promo_id).execute()
+    except Exception as e:
+        print(f"Mark promo used error: {e}")
 
 
 async def generate_paystack_payment_link(
     student: dict,
     tier: str,
-    billing_period: str
-) -> str:
+    billing_period: str,
+    discount_percent: int = 0,
+    promo_code: str = None,
+) -> tuple[str, int]:
     """
-    Generates a Paystack payment link for a student.
+    Generates a Paystack payment link.
+    Returns (url, final_amount_naira).
+    Discount is already calculated and passed in.
     """
     import httpx
     import time
 
-    price_map = {
-        ('scholar', 'monthly'): settings.SCHOLAR_MONTHLY,
-        ('scholar', 'yearly'): settings.SCHOLAR_YEARLY,
-        ('pro', 'monthly'): settings.PRO_MONTHLY,
-        ('pro', 'yearly'): settings.PRO_YEARLY,
-        ('elite', 'monthly'): settings.ELITE_MONTHLY,
-        ('elite', 'yearly'): settings.ELITE_YEARLY,
-    }
-
-    amount_naira = price_map.get((tier.lower(), billing_period.lower()))
-    if not amount_naira:
+    original_amount = settings.get_price_for_tier(tier, billing_period)
+    if original_amount == 0:
         raise ValueError(f"Invalid tier/billing combination: {tier}/{billing_period}")
+
+    if discount_percent > 0:
+        discount = int(original_amount * discount_percent / 100)
+        amount_naira = max(100, original_amount - discount)
+    else:
+        amount_naira = original_amount
 
     from database.client import supabase
     phone_result = supabase.table('platform_sessions').select('platform_user_id')\
-        .eq('student_id', student['id'])\
-        .eq('platform', 'whatsapp')\
-        .execute()
-
+        .eq('student_id', student['id']).eq('platform', 'whatsapp').execute()
     phone = phone_result.data[0]['platform_user_id'] if phone_result.data else ''
 
     clean_wax = student['wax_id'].lower().replace('-', '')
     student_email = f"{clean_wax}@students.waxprep.ng"
-
     reference = f"WAX-{student['wax_id']}-{int(time.time())}"
+
+    metadata = {
+        "student_id": student['id'],
+        "wax_id": student['wax_id'],
+        "plan": tier,
+        "billing_period": billing_period,
+        "phone": phone,
+        "student_name": student.get('name', ''),
+        "amount_naira": amount_naira,
+        "original_amount": original_amount,
+        "discount_percent": discount_percent,
+        "promo_code_applied": promo_code or '',
+        "custom_fields": [
+            {"display_name": "Student Name", "variable_name": "student_name", "value": student.get('name', '')},
+            {"display_name": "WAX ID", "variable_name": "wax_id", "value": student['wax_id']},
+        ]
+    }
 
     payload = {
         "email": student_email,
         "amount": amount_naira * 100,
         "reference": reference,
-        "callback_url": f"https://waxprep-dev.github.io/Waxprep-backend/payment_success.html?ref={reference}",
-        "metadata": {
-            "student_id": student['id'],
-            "wax_id": student['wax_id'],
-            "plan": tier,
-            "billing_period": billing_period,
-            "phone": phone,
-            "student_name": student.get('name', ''),
-            "amount_naira": amount_naira,
-            "custom_fields": [
-                {
-                    "display_name": "Student Name",
-                    "variable_name": "student_name",
-                    "value": student.get('name', '')
-                },
-                {
-                    "display_name": "WAX ID",
-                    "variable_name": "wax_id",
-                    "value": student['wax_id']
-                }
-            ]
-        },
+        "callback_url": f"{settings.PAYMENT_SUCCESS_URL}?ref={reference}",
+        "metadata": metadata,
         "channels": ["card", "bank", "ussd", "qr", "mobile_money", "bank_transfer"],
         "currency": "NGN",
     }
@@ -146,7 +199,7 @@ async def generate_paystack_payment_link(
     }
 
     if not settings.PAYSTACK_SECRET_KEY:
-        raise Exception("Paystack secret key not configured. Please set PAYSTACK_SECRET_KEY in environment variables.")
+        raise Exception("Paystack secret key not configured. Set PAYSTACK_SECRET_KEY in environment variables.")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
@@ -156,27 +209,17 @@ async def generate_paystack_payment_link(
         )
 
         if response.status_code != 200:
-            error_text = response.text[:200]
-            print(f"Paystack API error {response.status_code}: {error_text}")
-            raise Exception(f"Paystack API returned {response.status_code}. Check your PAYSTACK_SECRET_KEY.")
+            raise Exception(f"Paystack API returned {response.status_code}: {response.text[:200]}")
 
         data = response.json()
-
         if data.get('status'):
-            return data['data']['authorization_url']
+            return data['data']['authorization_url'], amount_naira
         else:
             raise Exception(f"Paystack initialization failed: {data.get('message', 'Unknown error')}")
 
 
-async def generate_payg_payment_link(
-    student: dict,
-    package: str
-) -> str:
-    """
-    Generates a Pay-As-You-Go payment link for question credits.
-    Packages: '100', '250', '500'
-    FIXED: Added callback_url so students can return after payment.
-    """
+async def generate_payg_payment_link(student: dict, package: str) -> tuple[str, int]:
+    """Generates a Pay-As-You-Go payment link. Returns (url, amount)."""
     import httpx
     import time
 
@@ -185,21 +228,19 @@ async def generate_payg_payment_link(
         '250': settings.PAYG_250_QUESTIONS,
         '500': settings.PAYG_500_QUESTIONS,
     }
-
     amount_naira = package_map.get(package)
     if not amount_naira:
         raise ValueError(f"Invalid PAYG package: {package}")
 
     clean_wax = student['wax_id'].lower().replace('-', '')
     student_email = f"{clean_wax}@students.waxprep.ng"
-
     reference = f"PAYG-{student['wax_id']}-{package}-{int(time.time())}"
 
     payload = {
         "email": student_email,
         "amount": amount_naira * 100,
         "reference": reference,
-        "callback_url": f"https://waxprep-dev.github.io/Waxprep-backend/payment_success.html?ref={reference}",
+        "callback_url": f"{settings.PAYMENT_SUCCESS_URL}?ref={reference}",
         "metadata": {
             "student_id": student['id'],
             "wax_id": student['wax_id'],
@@ -226,23 +267,19 @@ async def generate_payg_payment_link(
             headers=headers,
             json=payload
         )
-
         data = response.json()
-
         if data.get('status'):
-            return data['data']['authorization_url']
+            return data['data']['authorization_url'], amount_naira
         else:
             raise Exception(f"PAYG link failed: {data.get('message', 'Unknown error')}")
 
 
 async def verify_paystack_payment(reference: str) -> dict:
-    """Verifies a payment with Paystack."""
     import httpx
     headers = {
         "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
         "Content-Type": "application/json",
     }
-
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get(
             f"{settings.PAYSTACK_API_URL}/transaction/verify/{reference}",
