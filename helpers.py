@@ -8,6 +8,7 @@ import bcrypt
 
 NIGERIA_TZ = ZoneInfo("Africa/Lagos")
 
+
 def normalize_phone(phone: str) -> str:
     phone = re.sub(r'\D', '', phone)
     if phone.startswith('0') and len(phone) == 11:
@@ -18,9 +19,11 @@ def normalize_phone(phone: str) -> str:
         phone = '234' + phone
     return phone
 
+
 def hash_phone(phone: str) -> str:
     normalized = normalize_phone(phone)
     return hashlib.sha256(normalized.encode()).hexdigest()
+
 
 def validate_phone(phone: str) -> bool:
     try:
@@ -32,30 +35,34 @@ def validate_phone(phone: str) -> bool:
         digits = re.sub(r'\D', '', phone)
         return len(digits) in [10, 11, 13]
 
+
 def generate_wax_id() -> str:
     letter = random.choice(string.ascii_uppercase)
     chars = string.ascii_uppercase + string.digits
     suffix = ''.join(random.choices(chars, k=5))
     return f"WAX-{letter}{suffix}"
 
+
 def generate_recovery_code() -> str:
     words = [
         'BRAVE', 'SMART', 'BOLD', 'KEEN', 'SWIFT', 'SHARP', 'BRIGHT', 'WISE',
         'GREAT', 'PURE', 'GOLD', 'STAR', 'FIRE', 'IRON', 'LION', 'EAGLE',
         'HAWK', 'APEX', 'NOVA', 'BEAM', 'RISE', 'SHINE', 'ACE', 'TOP',
-        'PRIME', 'CORE', 'PEAK', 'FLUX', 'GLOW', 'ROCK'
+        'PRIME', 'CORE', 'PEAK', 'FLUX', 'GLOW', 'ROCK', 'JADE', 'CROWN',
     ]
     word = random.choice(words)
-    numbers = ''.join(random.choices(string.digits, k=2))
+    numbers = ''.join(random.choices(string.digits, k=3))
     return f"WAX{word}{numbers}"
+
 
 def generate_referral_code(wax_id: str) -> str:
     clean = wax_id.replace('WAX-', '').replace('-', '')
     return f"WAX{clean[:4].upper()}"
 
+
 def generate_promo_code(code_type: str = 'daily') -> str:
     chars = string.ascii_uppercase + string.digits
-    suffix = ''.join(random.choices(chars, k=4))
+    suffix = ''.join(random.choices(chars, k=5))
     prefix_map = {
         'daily': 'DAY',
         'trial': 'TRY',
@@ -66,11 +73,14 @@ def generate_promo_code(code_type: str = 'daily') -> str:
     prefix = prefix_map.get(code_type, 'WAX')
     return f"{prefix}{suffix}"
 
+
 def nigeria_now() -> datetime:
     return datetime.now(NIGERIA_TZ)
 
+
 def nigeria_today() -> str:
     return nigeria_now().strftime('%Y-%m-%d')
+
 
 def get_time_of_day() -> str:
     hour = nigeria_now().hour
@@ -82,6 +92,7 @@ def get_time_of_day() -> str:
         return 'evening'
     else:
         return 'night'
+
 
 def time_until(future_dt: datetime) -> str:
     if not future_dt:
@@ -102,6 +113,7 @@ def time_until(future_dt: datetime) -> str:
     else:
         return f"{minutes} minute{'s' if minutes != 1 else ''}"
 
+
 def days_since(past_dt: datetime) -> int:
     if not past_dt:
         return 0
@@ -110,16 +122,21 @@ def days_since(past_dt: datetime) -> int:
         past_dt = past_dt.replace(tzinfo=NIGERIA_TZ)
     return max(0, (now - past_dt).days)
 
+
 def clean_name(name: str) -> str:
+    name = re.sub(r'[^a-zA-Z\s\'-]', '', name)
     return ' '.join(word.capitalize() for word in name.strip().split() if word)
 
+
 def format_naira(amount: int) -> str:
-    return f"₦{amount:,}"
+    return f"\u20a6{amount:,}"
+
 
 def truncate_text(text: str, max_length: int = 200) -> str:
     if len(text) <= max_length:
         return text
     return text[:max_length - 3] + "..."
+
 
 def split_for_whatsapp(text: str, max_length: int = 4000) -> list:
     if len(text) <= max_length:
@@ -151,11 +168,14 @@ def split_for_whatsapp(text: str, max_length: int = 4000) -> list:
         chunks[i] += "\n\n_(continued...)_"
     return chunks if chunks else [text]
 
+
 def is_valid_pin(pin: str) -> bool:
     return bool(re.match(r'^\d{4}$', str(pin).strip()))
 
+
 def is_valid_wax_id(wax_id: str) -> bool:
     return bool(re.match(r'^WAX-[A-Z][A-Z0-9]{5}$', str(wax_id).strip().upper()))
+
 
 def extract_wax_id(text: str) -> str | None:
     text_upper = text.strip().upper()
@@ -167,15 +187,18 @@ def extract_wax_id(text: str) -> str | None:
         return f"WAX-{match.group(1)}"
     return None
 
+
 def sanitize_input(text: str) -> str:
     text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
     return text.strip()[:2000]
+
 
 def hash_pin(pin: str) -> str:
     pin_bytes = str(pin).encode('utf-8')
     salt = bcrypt.gensalt(rounds=12)
     hashed = bcrypt.hashpw(pin_bytes, salt)
     return hashed.decode('utf-8')
+
 
 def verify_pin(pin: str, pin_hash: str) -> bool:
     try:
@@ -185,38 +208,41 @@ def verify_pin(pin: str, pin_hash: str) -> bool:
     except Exception:
         return False
 
+
 def safe_calc(expression: str) -> str | None:
     try:
-        cleaned = re.sub(r'[^0-9+-*/().\s]', '', expression)
-        if not cleaned.strip():
+        cleaned = re.sub(r'[^0-9+\-*/().\s]', '', expression)
+        if not cleaned.strip() or len(cleaned) > 100:
             return None
-        if len(cleaned) > 100:
-            return None
-        result = eval(cleaned, {"builtins": {}})
+        result = eval(cleaned, {"__builtins__": {}})
         if isinstance(result, float) and result.is_integer():
             return str(int(result))
         return str(round(result, 6))
     except Exception:
         return None
 
+
 _ALMOST_MESSAGES = [
-    "Almost! You were right about part of it 💪",
+    "Almost! You were right about part of it",
     "Close — you're thinking about it the right way, just one piece shifted",
     "Good thinking — let me show you where it went a slightly different direction",
-    "You're on the right track! Small adjustment needed 🎯",
+    "You're on the right track! Small adjustment needed",
     "Nearly there! Let me show you the slight difference",
     "Not quite, but this is actually a very common mix-up. Let me break it down",
     "Good attempt — the reasoning is solid, just one detail off",
 ]
+
 _CORRECT_MESSAGES = [
-    "Excellent! That's exactly right! 🎉",
-    "Perfect! You nailed it! ⭐",
-    "Correct! Outstanding! 🏆",
-    "That's exactly it! Well done! 🌟",
-    "Great job! You got it! 💫",
-    "Boom! You're on fire! 🔥",
-    "Yes! That is the one! 💪",
+    "Excellent! That's exactly right!",
+    "Perfect! You nailed it!",
+    "Correct! Outstanding!",
+    "That's exactly it! Well done!",
+    "Great job! You got it!",
+    "Boom! You're on fire!",
+    "Yes! That is the one!",
+    "Sharp! You didn't even hesitate.",
 ]
+
 _WRONG_MESSAGES = [
     "You attempted to apply the formula, which is exactly the right approach. Let me show you a small adjustment.",
     "I can see your reasoning — let me show you a cleaner angle on this one",
@@ -224,11 +250,14 @@ _WRONG_MESSAGES = [
     "No worries — this is actually one of the trickier ones. Let's break it down",
 ]
 
+
 def get_almost_message() -> str:
     return random.choice(_ALMOST_MESSAGES)
 
+
 def get_correct_message() -> str:
     return random.choice(_CORRECT_MESSAGES)
+
 
 def get_wrong_message() -> str:
     return random.choice(_WRONG_MESSAGES)
