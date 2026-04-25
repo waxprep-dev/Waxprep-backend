@@ -1,11 +1,11 @@
 """
 WaxPrep Main Application
-
-FIXES IN THIS VERSION:
-- Admin API endpoints now require X-Admin-Key header
-- Payment webhook now checks for duplicate payments before processing
-- Paystack HMAC verification hardened — rejects requests with no secret key
-- Amount verification added to prevent plan manipulation
+FIXES:
+- Webhook message deduplication using Redis (prevents same message being processed 3-4 times)
+- Admin API endpoints protected by X-Admin-Key header
+- Payment webhook checks for duplicate payments before processing
+- Paystack HMAC verification hardened
+- Amount verification added
 """
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Depends
@@ -18,13 +18,7 @@ from config.settings import settings
 
 
 def verify_admin_key(request: Request):
-    """
-    Dependency function that protects all admin API endpoints.
-    Checks for X-Admin-Key header against ADMIN_API_KEY setting.
-    Set ADMIN_API_KEY in your Railway environment variables.
-    """
     if not settings.ADMIN_API_KEY:
-        # If no key is configured, block all access and warn
         raise HTTPException(
             status_code=503,
             detail="Admin API not configured. Set ADMIN_API_KEY in environment variables."
@@ -39,7 +33,6 @@ def verify_admin_key(request: Request):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup and shutdown logic."""
     print("WaxPrep is starting up...")
 
     try:
@@ -125,7 +118,6 @@ async def health_check():
 
 @app.get("/webhook/whatsapp")
 async def whatsapp_webhook_verify(request: Request):
-    """WhatsApp webhook verification."""
     params = dict(request.query_params)
 
     verify_token = params.get("hub.verify_token", "")
@@ -142,10 +134,6 @@ async def whatsapp_webhook_verify(request: Request):
 
 @app.post("/webhook/whatsapp")
 async def whatsapp_webhook_receive(request: Request, background_tasks: BackgroundTasks):
-    """
-    Receives all incoming WhatsApp messages.
-    Body is read synchronously before background task — this is the fix for silent failures.
-    """
     try:
         body_bytes = await request.body()
 
@@ -174,7 +162,7 @@ async def whatsapp_webhook_receive(request: Request, background_tasks: Backgroun
 
 
 async def process_whatsapp_message_data(body_data: dict):
-    """Background task that processes WhatsApp message data."""
+    """Background task that processes WhatsApp message data with deduplication."""
     try:
         print(f"Processing webhook data...")
 
@@ -192,6 +180,23 @@ async def process_whatsapp_message_data(body_data: dict):
 
                 for message_data in messages:
                     try:
+                        message_id = message_data.get('id', '')
+
+                        # DEDUPLICATION - WhatsApp retries webhooks causing the same
+                        # message to be processed 3-4 times. We block duplicates here.
+                        if message_id:
+                            try:
+                                from database.client import redis_client
+                                dedup_key = f"processed_msg:{message_id}"
+                                already_processed = redis_client.get(dedup_key)
+                                if already_processed:
+                                    print(f"Duplicate webhook for message {message_id} — skipping")
+                                    continue
+                                # Mark as processed for 5 minutes
+                                redis_client.setex(dedup_key, 300, "1")
+                            except Exception as redis_err:
+                                print(f"Redis dedup error (non-critical): {redis_err}")
+
                         print(f"Processing message from: {message_data.get('from', 'unknown')}")
                         from whatsapp.handler import process_single_message
                         await process_single_message(message_data, value)
@@ -209,10 +214,6 @@ async def process_whatsapp_message_data(body_data: dict):
 
 @app.post("/webhook/paystack")
 async def paystack_webhook(request: Request, background_tasks: BackgroundTasks):
-    """
-    Receives payment confirmations from Paystack.
-    FIXED: Stricter HMAC verification — rejects if secret key missing.
-    """
     import hmac
     import hashlib
     import json
@@ -236,7 +237,6 @@ async def paystack_webhook(request: Request, background_tasks: BackgroundTasks):
                 print(f"Invalid Paystack signature — possible forgery attempt")
                 raise HTTPException(status_code=400, detail="Invalid signature")
         else:
-            # No secret key configured — block ALL webhook processing
             print("WARNING: PAYSTACK_SECRET_KEY not set. Rejecting webhook for security.")
             raise HTTPException(status_code=503, detail="Payment webhook not configured")
 
@@ -256,7 +256,6 @@ async def paystack_webhook(request: Request, background_tasks: BackgroundTasks):
 
 
 async def process_paystack_event(body_data: dict):
-    """Processes Paystack payment events in background."""
     try:
         event = body_data.get('event', '')
         data = body_data.get('data', {})
@@ -277,11 +276,6 @@ async def process_paystack_event(body_data: dict):
 
 
 async def handle_successful_payment(payment_data: dict):
-    """
-    Activates subscription or adds PAYG credits after successful Paystack payment.
-    FIXED: Now checks for duplicate payments before processing.
-    FIXED: Verifies amount matches expected price to prevent plan manipulation.
-    """
     from database.client import supabase
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
@@ -302,7 +296,6 @@ async def handle_successful_payment(payment_data: dict):
         print(f"Payment {reference} has no student_id in metadata — cannot process")
         return
 
-    # FIXED: Check for duplicate payment before doing anything
     try:
         existing_payment = supabase.table('payments')\
             .select('id')\
@@ -314,9 +307,7 @@ async def handle_successful_payment(payment_data: dict):
             return
     except Exception as e:
         print(f"Duplicate check error: {e}")
-        # Continue cautiously — better to try than to silently skip
 
-    # FIXED: Verify amount matches expected price to prevent manipulation
     if plan != 'payg':
         price_map = {
             ('scholar', 'monthly'): settings.SCHOLAR_MONTHLY,
@@ -336,7 +327,6 @@ async def handle_successful_payment(payment_data: dict):
 
     now = datetime.now(ZoneInfo("Africa/Lagos"))
 
-    # Record the payment
     try:
         supabase.table('payments').insert({
             'student_id': student_id,
@@ -348,7 +338,6 @@ async def handle_successful_payment(payment_data: dict):
         }).execute()
     except Exception as e:
         print(f"Payment record error: {e}")
-        # If we can't record it, don't activate either
         return
 
     student_result = supabase.table('students').select('name').eq('id', student_id).execute()
@@ -431,11 +420,8 @@ async def handle_successful_payment(payment_data: dict):
             traceback.print_exc()
 
 
-# ADMIN ENDPOINTS — All protected by X-Admin-Key header
-
 @app.get("/admin/stats", dependencies=[Depends(verify_admin_key)])
 async def get_admin_stats():
-    """Returns platform statistics. Requires X-Admin-Key header."""
     from database.client import supabase, redis_client
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -473,10 +459,6 @@ async def get_admin_stats():
 
 @app.post("/admin/broadcast", dependencies=[Depends(verify_admin_key)])
 async def api_broadcast(request: Request, background_tasks: BackgroundTasks):
-    """
-    HTTP endpoint to send broadcast messages.
-    Body: {"target": "ALL|FREE|SCHOLAR|TRIAL", "message": "your message here"}
-    """
     try:
         data = await request.json()
         target = data.get('target', 'ALL')
@@ -493,7 +475,6 @@ async def api_broadcast(request: Request, background_tasks: BackgroundTasks):
 
 
 async def run_broadcast(target: str, message: str):
-    """Runs a broadcast in the background."""
     try:
         from admin.dashboard import admin_broadcast
         from config.settings import settings
@@ -505,10 +486,6 @@ async def run_broadcast(target: str, message: str):
 
 @app.post("/admin/create-promo", dependencies=[Depends(verify_admin_key)])
 async def api_create_promo(request: Request):
-    """
-    HTTP endpoint to create promo codes.
-    Body: {"code": "WAX2024", "code_type": "full_trial", "bonus_days": 7, "max_uses": 100}
-    """
     try:
         from database.client import supabase
         data = await request.json()
@@ -532,10 +509,6 @@ async def api_create_promo(request: Request):
 
 @app.post("/admin/send-message", dependencies=[Depends(verify_admin_key)])
 async def api_send_message(request: Request):
-    """
-    HTTP endpoint to send a message to a specific student.
-    Body: {"wax_id": "WAX-A74892", "message": "Hello!"}
-    """
     try:
         from database.client import supabase
         from whatsapp.sender import send_whatsapp_message
@@ -567,7 +540,6 @@ async def api_send_message(request: Request):
 
 @app.get("/admin/trigger-report", dependencies=[Depends(verify_admin_key)])
 async def trigger_daily_report(background_tasks: BackgroundTasks):
-    """Manually triggers the daily admin report."""
     from utils.scheduler import send_daily_admin_report
     background_tasks.add_task(send_daily_admin_report)
     return {"success": True, "message": "Daily report triggered — check your WhatsApp"}
@@ -575,7 +547,6 @@ async def trigger_daily_report(background_tasks: BackgroundTasks):
 
 @app.get("/admin/trigger-challenge", dependencies=[Depends(verify_admin_key)])
 async def trigger_daily_challenge(background_tasks: BackgroundTasks):
-    """Manually triggers daily challenge generation."""
     from utils.scheduler import generate_daily_challenge
     background_tasks.add_task(generate_daily_challenge)
     return {"success": True, "message": "Challenge generation triggered"}
@@ -583,7 +554,6 @@ async def trigger_daily_challenge(background_tasks: BackgroundTasks):
 
 @app.get("/admin/student/{wax_id}", dependencies=[Depends(verify_admin_key)])
 async def get_student_info(wax_id: str):
-    """Returns information about a specific student."""
     try:
         from database.client import supabase
 
