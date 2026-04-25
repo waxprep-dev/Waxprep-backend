@@ -1,22 +1,44 @@
 """
-WhatsApp Message Handler - Redesigned
+WhatsApp Message Handler — Speed-Optimized
 
-PHILOSOPHY:
-- Route to AI for almost everything
-- Only hard-route explicit commands and quiz answer evaluation
-- AI handles context naturally through conversation history
-- No more complex intent classification trees
+Architecture:
+- Cache-first for everything
+- Parallel async where possible  
+- Hard commands routed instantly
+- Everything else goes to AI brain
+- Background tasks for non-critical updates
+
+Target: Under 2 seconds total response time.
 """
 
+import asyncio
+import random
 from config.settings import settings
 from helpers import nigeria_today, get_time_of_day, sanitize_input
-import random
+
+
+def _get_state(conversation: dict) -> dict:
+    import json
+    raw = conversation.get('conversation_state', {})
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {}
+    return raw or {}
 
 
 async def process_single_message(message_data: dict, value: dict) -> None:
     from whatsapp.sender import send_whatsapp_message
+
     phone = message_data.get('from', '')
     message_id = message_data.get('id', '')
+
+    # Check deduplication FIRST — WhatsApp retries webhooks 3-4x
+    from database.cache import is_message_processed
+    if message_id and is_message_processed(message_id):
+        print(f"Duplicate message {message_id} — skipped")
+        return
 
     name = "Student"
     contacts = value.get('contacts', [])
@@ -57,12 +79,17 @@ async def process_single_message(message_data: dict, value: dict) -> None:
     message = sanitize_input(message) if message else message
 
     try:
+        # Mark as read in background — don't wait for it
         if message_id:
-            from whatsapp.sender import mark_as_read
-            await mark_as_read(message_id)
+            asyncio.ensure_future(_mark_read(message_id))
 
-        await route_message(phone=phone, name=name, message=message,
-                           message_type=message_type, media_id=media_id)
+        await route_message(
+            phone=phone,
+            name=name,
+            message=message,
+            message_type=message_type,
+            media_id=media_id
+        )
 
     except Exception as e:
         print(f"Error in process_single_message: {e}")
@@ -74,67 +101,66 @@ async def process_single_message(message_data: dict, value: dict) -> None:
             pass
 
 
+async def _mark_read(message_id: str):
+    try:
+        from whatsapp.sender import mark_as_read
+        await mark_as_read(message_id)
+    except Exception:
+        pass
+
+
 async def route_message(phone: str, name: str, message: str,
-                        message_type: str = 'text', media_id: str = None) -> None:
-    """
-    Main routing function. Simplified.
-    
-    Order of routing:
-    1. Admin commands
-    2. Onboarding (new/unregistered users)
-    3. Voice/Image handling
-    4. Explicit account commands (PROGRESS, BALANCE, etc.)
-    5. Explicit payment commands (PAYG, SUBSCRIBE + plan)
-    6. Quiz answer evaluation (when awaiting A/B/C/D)
-    7. Mock exam answer (when in exam mode)
-    8. Feedback commands (BUG, SUGGEST)
-    9. EVERYTHING ELSE → AI brain
-    """
+                         message_type: str = 'text', media_id: str = None) -> None:
     from whatsapp.sender import send_whatsapp_message
-    from features.wax_id import student_exists_in_platform
+    from database.students import get_student_by_phone
     from database.conversations import get_or_create_conversation
     from admin.dashboard import is_admin, handle_admin_command
 
     msg_upper = message.strip().upper() if message else ''
 
-    # 1. Admin commands
+    # 1. Admin commands — instant
     if is_admin(phone) and msg_upper.startswith('ADMIN '):
         await handle_admin_command(phone, message)
         return
 
-    # 2. Get or create student session
-    student = await student_exists_in_platform('whatsapp', phone)
+    # 2. Load student from cache (fast) or DB — do this in parallel with conversation
+    student_task = asyncio.ensure_future(get_student_by_phone(phone))
+    student = await student_task
 
     if student and student.get('is_banned'):
         await send_whatsapp_message(phone, "Your account has been suspended. Contact support.")
         return
 
+    student_id = student['id'] if student else 'anonymous'
     conversation = await get_or_create_conversation(
-        student_id=student['id'] if student else 'anonymous',
+        student_id=student_id,
         platform='whatsapp',
         platform_user_id=phone
     )
 
-    # 3. Unregistered users go to onboarding
+    # 3. Unregistered users → onboarding
     if not student:
         from whatsapp.flows.onboarding import handle_new_or_existing, handle_onboarding_response
 
         state = _get_state(conversation)
         awaiting = state.get('awaiting_response_for', '')
 
-        if awaiting in ['new_or_existing', 'terms_acceptance', 'wax_id_entry', 'pin_entry',
-                        'name', 'class_level', 'target_exam', 'subjects', 'exam_date',
-                        'state_region', 'language_pref', 'pin_setup', 'pin_confirm']:
+        onboarding_steps = {
+            'new_or_existing', 'terms_acceptance', 'wax_id_entry', 'pin_entry',
+            'name', 'class_level', 'target_exam', 'subjects', 'exam_date',
+            'state', 'language_pref', 'pin_setup', 'pin_confirm'
+        }
+
+        if awaiting in onboarding_steps:
             await handle_onboarding_response(phone, conversation, message)
         else:
             await handle_new_or_existing(phone, conversation, message)
         return
 
-    # Parse conversation state
     conv_state = _get_state(conversation)
-
-    # Reset session counter if new day
     today = nigeria_today()
+
+    # Reset daily session counter
     if conv_state.get('session_date', '') != today:
         conv_state['session_questions'] = 0
         conv_state['session_correct'] = 0
@@ -143,38 +169,43 @@ async def route_message(phone: str, name: str, message: str,
     awaiting = conv_state.get('awaiting_response_for', '')
     current_mode = conversation.get('current_mode', 'default')
 
-    # 4. Handle remaining onboarding if somehow still there
-    if awaiting in ['new_or_existing', 'terms_acceptance', 'wax_id_entry', 'pin_entry',
-                    'name', 'class_level', 'target_exam', 'subjects', 'exam_date',
-                    'state_region', 'language_pref', 'pin_setup', 'pin_confirm']:
+    # 4. Remaining onboarding (if student got registered mid-flow)
+    onboarding_steps = {
+        'new_or_existing', 'terms_acceptance', 'wax_id_entry', 'pin_entry',
+        'name', 'class_level', 'target_exam', 'subjects', 'exam_date',
+        'state', 'language_pref', 'pin_setup', 'pin_confirm'
+    }
+    if awaiting in onboarding_steps:
         from whatsapp.flows.onboarding import handle_onboarding_response
         await handle_onboarding_response(phone, conversation, message)
         return
 
-    # 5. Voice/Image
+    # 5. Media handling
     if message_type == 'image':
         await _handle_image(phone, student, media_id, message)
         return
+
     if message_type in ['voice', 'audio']:
         await _handle_voice(phone, student)
         return
 
-    # 6. Bug/Suggestion (these start with BUG or SUGGEST)
+    # 6. Bug/Suggestion
     if msg_upper.startswith('BUG ') or msg_upper == 'BUG':
         from features.feedback import handle_bug_report
         response = await handle_bug_report(phone, student, message)
         await send_whatsapp_message(phone, response)
         return
+
     if msg_upper.startswith('SUGGEST ') or msg_upper == 'SUGGEST':
         from features.feedback import handle_suggestion
         response = await handle_suggestion(phone, student, message)
         await send_whatsapp_message(phone, response)
         return
 
-    # 7. Explicit account/utility commands (these work as typed commands)
+    # 7. Explicit account commands
     ACCOUNT_COMMANDS = {
-        'PROGRESS', 'MYID', 'STREAK', 'BALANCE', 'BADGES', 'REFERRAL', 'PLAN',
-        'PAUSE', 'CONTINUE', 'STOP', 'HELP', 'MODES'
+        'PROGRESS', 'MYID', 'STREAK', 'BALANCE', 'BADGES',
+        'REFERRAL', 'PLAN', 'PAUSE', 'CONTINUE', 'STOP', 'HELP', 'MODES'
     }
     first_word = msg_upper.split()[0] if msg_upper else ''
 
@@ -183,35 +214,45 @@ async def route_message(phone: str, name: str, message: str,
         await handle_command(phone, student, conversation, message, first_word)
         return
 
-    # 8. Payment commands
+    # 8. PAYG
     if first_word == 'PAYG':
         from whatsapp.flows.commands import handle_payg
         await handle_payg(phone, student, conversation, message)
         return
 
-    if first_word == 'PROMO' or first_word == 'CODE':
+    # 9. PROMO / CODE
+    if first_word in ('PROMO', 'CODE'):
         from whatsapp.flows.commands import handle_promo_code
         await handle_promo_code(phone, student, conversation, message)
         return
 
+    # 10. SUBSCRIBE and plan keywords
     if first_word == 'SUBSCRIBE':
         from whatsapp.flows.subscription import handle_subscription_flow
         await handle_subscription_flow(phone, student, conversation, message)
         return
 
-    PLAN_KEYWORDS = ['SCHOLAR MONTHLY', 'SCHOLAR YEARLY', 'PRO MONTHLY', 'PRO YEARLY', 'ELITE MONTHLY', 'ELITE YEARLY']
+    PLAN_KEYWORDS = [
+        'SCHOLAR MONTHLY', 'SCHOLAR YEARLY', 'PRO MONTHLY',
+        'PRO YEARLY', 'ELITE MONTHLY', 'ELITE YEARLY'
+    ]
     if any(kw in msg_upper for kw in PLAN_KEYWORDS):
         from whatsapp.flows.subscription import handle_subscription_flow
         await handle_subscription_flow(phone, student, conversation, message)
         return
 
-    # 9. Mock exam mode - handle A/B/C/D answers
+    # 11. Subscription promo code during checkout
+    if awaiting == 'subscription_promo_code':
+        from whatsapp.flows.subscription import handle_promo_code_during_checkout
+        await handle_promo_code_during_checkout(phone, student, conversation, message, conv_state)
+        return
+
+    # 12. Mock exam mode
     if current_mode == 'exam' or awaiting == 'exam_answer':
         from whatsapp.flows.mock_exam import handle_exam_answer
         await handle_exam_answer(phone, student, conversation, message)
         return
 
-    # 10. EXAM command
     if msg_upper == 'EXAM' or msg_upper.startswith('EXAM '):
         from whatsapp.flows.mock_exam import start_mock_exam
         await start_mock_exam(phone, student, conversation)
@@ -222,12 +263,12 @@ async def route_message(phone: str, name: str, message: str,
         await handle_exam_setup_choice(phone, student, conversation, message, conv_state)
         return
 
-    # 11. Quiz answer evaluation
+    # 13. Quiz answer evaluation
     if awaiting == 'quiz_answer':
         await _evaluate_quiz_answer(phone, student, conversation, message, conv_state)
         return
 
-    # 12. Daily challenge
+    # 14. Daily challenge
     if msg_upper in ['CHALLENGE', 'DAILY CHALLENGE']:
         from whatsapp.flows.study import handle_daily_challenge
         await handle_daily_challenge(phone, student, conversation)
@@ -238,40 +279,33 @@ async def route_message(phone: str, name: str, message: str,
         await handle_challenge_answer(phone, student, conversation, message, conv_state)
         return
 
-    # 13. EVERYTHING ELSE → AI Brain
+    # 15. EVERYTHING ELSE → AI Brain
     await _think_and_respond(phone, student, conversation, message, conv_state)
 
 
 async def _think_and_respond(phone: str, student: dict, conversation: dict,
                               message: str, conv_state: dict) -> None:
     """
-    The main AI interaction. This handles:
-    - Academic questions
-    - Explanations
-    - Quiz generation
-    - Greetings
-    - Casual chat
-    - Context-aware responses
-    - "I forgot" type messages
-    - Payment inquiries
-    - Basically everything that isn't a hard command
+    The main AI interaction handler.
+    Loads full student context, calls the AI brain, handles the response.
     """
     from whatsapp.sender import send_whatsapp_message
     from database.conversations import get_conversation_history, update_conversation_state, save_message
     from database.students import can_student_ask_question, increment_questions_today
     from database.client import supabase
     from ai.brain import think
-    from helpers import nigeria_today
+    from ai.context_manager import get_full_student_context
+    from features.quiz_engine import extract_subject_from_message
 
-    # Check question limit for academic interactions
-    # We check this loosely — payment inquiries and greetings don't count against limit
     msg_lower = message.lower()
-    is_probably_academic = any(w in msg_lower for w in [
+    academic_indicators = [
         'what', 'how', 'why', 'explain', 'quiz', 'test', 'question',
         'define', 'calculate', 'solve', 'biology', 'physics', 'chemistry',
         'math', 'english', 'economics', 'government', 'study', 'learn',
-        'forgot', 'remind', 'confused', 'understand', 'practice'
-    ])
+        'forgot', 'remind', 'confused', 'understand', 'practice', 'example',
+        'formula', 'equation', 'describe', 'differentiate', 'between', 'meaning',
+    ]
+    is_probably_academic = any(w in msg_lower for w in academic_indicators)
 
     if is_probably_academic:
         can_ask, limit_msg = await can_student_ask_question(student)
@@ -279,30 +313,36 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
             await send_whatsapp_message(phone, limit_msg)
             return
 
-    # Get conversation history for context
-    history = await get_conversation_history(conversation['id'])
+    # Parallel: get history and context at the same time
+    history_task = asyncio.ensure_future(get_conversation_history(conversation['id']))
+    context_task = asyncio.ensure_future(get_full_student_context(student))
 
-    # Get current subject context
+    history, context = await asyncio.gather(history_task, context_task)
     recent_subject = conversation.get('current_subject')
 
-    # Save the student's message to history
-    await save_message(conversation['id'], student['id'], 'whatsapp', 'user', message)
+    # Save student message in background
+    asyncio.ensure_future(save_message(
+        conversation['id'], student['id'], 'whatsapp', 'user', message
+    ))
 
-    # Let the AI think
+    # Call AI brain
     response_text, question_data = await think(
         message=message,
         student=student,
         conversation_history=history,
-        recent_subject=recent_subject
+        recent_subject=recent_subject,
+        context=context,
     )
 
-    # Send the response
+    # Send response
     await send_whatsapp_message(phone, response_text)
 
-    # Save AI response to history
-    await save_message(conversation['id'], student['id'], 'whatsapp', 'assistant', response_text)
+    # Save AI response in background
+    asyncio.ensure_future(save_message(
+        conversation['id'], student['id'], 'whatsapp', 'assistant', response_text
+    ))
 
-    # If the AI generated a quiz question, store it and set awaiting state
+    # If AI generated a quiz question, set awaiting state
     if question_data:
         today = nigeria_today()
         new_state = {
@@ -311,7 +351,6 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
             'current_question': question_data,
             'session_date': today,
         }
-
         subject = question_data.get('subject', recent_subject or '')
         topic = question_data.get('topic', '')
 
@@ -325,43 +364,39 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
             }
         )
 
-        # Increment questions if academic
         if is_probably_academic:
-            await increment_questions_today(student['id'])
-            await _update_stats(student, phone, conv_state)
+            asyncio.ensure_future(increment_questions_today(student['id']))
+            asyncio.ensure_future(_update_stats(student, phone, conv_state))
 
     elif is_probably_academic:
-        # Regular academic response, not a quiz
-        await increment_questions_today(student['id'])
-        await _update_stats(student, phone, conv_state)
+        asyncio.ensure_future(increment_questions_today(student['id']))
+        asyncio.ensure_future(_update_stats(student, phone, conv_state))
 
-        # Update subject context if detected
-        from features.quiz_engine import extract_subject_from_message
         detected_subject = extract_subject_from_message(message)
         if detected_subject:
-            await update_conversation_state(
+            asyncio.ensure_future(update_conversation_state(
                 conversation['id'], 'whatsapp', phone,
                 {'current_subject': detected_subject}
-            )
+            ))
 
 
 async def _evaluate_quiz_answer(phone: str, student: dict, conversation: dict,
                                  message: str, conv_state: dict) -> None:
-    """Evaluates a student's answer to a quiz question."""
+    """Evaluates a student's A/B/C/D answer to a quiz question."""
     from whatsapp.sender import send_whatsapp_message
     from database.conversations import update_conversation_state, save_message
     from database.students import increment_questions_today
     from database.client import supabase
-    from features.quiz_engine import (evaluate_quiz_answer, update_mastery_after_answer,
-                                       calculate_and_award_points)
-    from database.questions import update_question_stats
+    from features.quiz_engine import evaluate_quiz_answer, calculate_and_award_points
     from features.badges import check_and_award_milestone_badges
+    from ai.adaptive_engine import record_interaction_outcome
+    from features.question_validator import evaluate_question_quality
+    from database.questions import update_question_stats
     from helpers import nigeria_today
 
     current_question = conv_state.get('current_question')
 
     if not current_question:
-        # Lost track of question — continue naturally
         await update_conversation_state(conversation['id'], 'whatsapp', phone, {
             'conversation_state': {**conv_state, 'awaiting_response_for': None}
         })
@@ -387,49 +422,40 @@ async def _evaluate_quiz_answer(phone: str, student: dict, conversation: dict,
         await send_whatsapp_message(phone, feedback)
         return
 
-    # Update mastery
     subject = current_question.get('subject', conversation.get('current_subject', ''))
     topic = current_question.get('topic', conversation.get('current_topic', ''))
+    difficulty = current_question.get('difficulty_level', 5)
 
-    await update_mastery_after_answer(
-        student_id=student['id'],
-        subject=subject,
-        topic=topic,
-        question_difficulty=current_question.get('difficulty_level', 5),
-        is_correct=is_correct
-    )
+    # Update mastery and question stats in background
+    asyncio.ensure_future(record_interaction_outcome(
+        student['id'], subject, topic, difficulty, is_correct
+    ))
 
-    # Update DB question stats if it has an ID
     if current_question.get('id'):
-        await update_question_stats(current_question['id'], is_correct)
+        asyncio.ensure_future(update_question_stats(current_question['id'], is_correct))
+        asyncio.ensure_future(evaluate_question_quality(current_question['id']))
 
-    # Update correct count
     if is_correct:
         try:
-            from database.client import supabase
             supabase.table('students').update({
                 'total_questions_correct': student.get('total_questions_correct', 0) + 1
             }).eq('id', student['id']).execute()
         except Exception:
             pass
 
-    # Award points
     points, _ = await calculate_and_award_points(
         student_id=student['id'],
         is_correct=is_correct,
-        question_difficulty=current_question.get('difficulty_level', 5)
+        question_difficulty=difficulty
     )
 
-    # Check milestone badges
     new_total = student.get('total_questions_answered', 0) + 1
     badges = await check_and_award_milestone_badges(student['id'], new_total)
 
-    # Build full feedback message
     full_feedback = feedback + f"\n\n+{points} point{'s' if points != 1 else ''}!"
     for badge in badges:
-        full_feedback += f"\n\n🏅 New Badge: *{badge['name']}*!\n{badge['description']}"
+        full_feedback += f"\n\nNew Badge: *{badge['name']}*!\n{badge['description']}"
 
-    # Natural follow-up suggestion — no forced NEXT command needed
     session_q = conv_state.get('session_questions', 0) + 1
     session_correct = conv_state.get('session_correct', 0) + (1 if is_correct else 0)
 
@@ -437,20 +463,22 @@ async def _evaluate_quiz_answer(phone: str, student: dict, conversation: dict,
         accuracy = round((session_correct / session_q) * 100)
         full_feedback += f"\n\n_{session_q} questions this session | {accuracy}% accuracy_"
 
-    # Natural continuation — ask without requiring a command
     name = student.get('name', 'Student').split()[0]
     continuations = [
         "\n\nAnother one?",
         f"\n\nReady for the next one, {name}?",
         "\n\nWant to continue or switch topics?",
         "\n\nShall we keep going?",
+        f"\n\nGood session, {name}. Next question?",
     ]
     full_feedback += random.choice(continuations)
 
     await send_whatsapp_message(phone, full_feedback)
-    await save_message(conversation['id'], student['id'], 'whatsapp', 'assistant', full_feedback)
 
-    # Update state — clear quiz question, set quiz_continue
+    asyncio.ensure_future(save_message(
+        conversation['id'], student['id'], 'whatsapp', 'assistant', full_feedback
+    ))
+
     today = nigeria_today()
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {
         'conversation_state': {
@@ -463,8 +491,8 @@ async def _evaluate_quiz_answer(phone: str, student: dict, conversation: dict,
         }
     })
 
-    await increment_questions_today(student['id'])
-    await _update_stats(student, phone, conv_state)
+    asyncio.ensure_future(increment_questions_today(student['id']))
+    asyncio.ensure_future(_update_stats(student, phone, conv_state))
 
 
 async def _update_stats(student: dict, phone: str, conv_state: dict) -> None:
@@ -481,7 +509,6 @@ async def _update_stats(student: dict, phone: str, conv_state: dict) -> None:
     except Exception:
         pass
 
-    # Update streak
     try:
         today = nigeria_today()
         yesterday = (datetime.now(ZoneInfo("Africa/Lagos")) - timedelta(days=1)).strftime('%Y-%m-%d')
@@ -521,15 +548,14 @@ async def _update_stats(student: dict, phone: str, conv_state: dict) -> None:
                     for badge in new_badges:
                         await send_whatsapp_message(
                             phone,
-                            f"🔥 *{new_streak}-Day Streak Badge!*\n\n"
-                            f"*{badge['name']}* — {badge['description']}\n\nKeep it going!"
+                            f"*{new_streak}-Day Streak Badge!*\n\n"
+                            f"*{badge['name']}* — {badge['description']}\n\nKeep going!"
                         )
                 except Exception:
                     pass
     except Exception:
         pass
 
-    # Level up check
     try:
         await _check_level(student['id'], phone)
     except Exception:
@@ -564,19 +590,24 @@ async def _check_level(student_id: str, phone: str):
         name = s.get('name', 'Student').split()[0]
         await send_whatsapp_message(
             phone,
-            f"⭐ *Level Up, {name}!*\n\nYou reached Level {new_level} — *{new_level_name}*!\n\n{points:,} total points. Keep going!"
+            f"Level Up, *{name}*!\n\n"
+            f"You reached Level {new_level} — *{new_level_name}*!\n\n"
+            f"{points:,} total points. Keep going!"
         )
 
 
 async def _handle_image(phone: str, student: dict, media_id: str, caption: str):
     from whatsapp.sender import send_whatsapp_message
     from database.students import get_student_subscription_status
+
     status = await get_student_subscription_status(student)
 
     if status['effective_tier'] == 'free' and not status['is_trial']:
         await send_whatsapp_message(
             phone,
-            "Image analysis is a Scholar Plan feature.\n\nUpgrade for ₦1,500/month to send textbook photos and get them explained instantly.\n\nType SUBSCRIBE to upgrade."
+            "Image analysis is a Scholar Plan feature.\n\n"
+            "Upgrade for N1,500/month to send textbook photos and get them explained instantly.\n\n"
+            "Type *SUBSCRIBE* to upgrade."
         )
         return
 
@@ -597,7 +628,10 @@ async def _handle_image(phone: str, student: dict, media_id: str, caption: str):
         await send_whatsapp_message(phone, result)
     except Exception as e:
         print(f"Image analysis error: {e}")
-        await send_whatsapp_message(phone, "Had trouble reading that image. Try taking a clearer photo, or type your question.")
+        await send_whatsapp_message(
+            phone,
+            "Had trouble reading that image. Try taking a clearer photo, or type your question instead."
+        )
 
 
 async def _handle_voice(phone: str, student: dict):
@@ -605,29 +639,6 @@ async def _handle_voice(phone: str, student: dict):
     name = student.get('name', 'Student').split()[0]
     await send_whatsapp_message(
         phone,
-        f"Got your voice note, {name}!\n\nVoice transcription is coming soon. For now, type your question and I'll answer right away."
+        f"Got your voice note, {name}!\n\n"
+        "Voice transcription is coming very soon. For now, type your question and I'll answer immediately."
     )
-
-
-def _get_state(conversation: dict) -> dict:
-    """Safely gets conversation state as a dict."""
-    import json
-    raw = conversation.get('conversation_state', {})
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except Exception:
-            return {}
-    return raw or {}
-
-
-# Backward compatibility
-async def process_message(phone: str, name: str, message: str,
-                          message_type: str = 'text', media_id: str = None) -> None:
-    await route_message(phone=phone, name=name, message=message,
-                       message_type=message_type, media_id=media_id)
-
-
-async def award_badge(student_id: str, badge_code: str):
-    from features.badges import award_badge as _ab
-    return await _ab(student_id, badge_code)
