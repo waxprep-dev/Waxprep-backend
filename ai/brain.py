@@ -3,7 +3,8 @@ WaxPrep AI Brain
 
 Groq primary (fast, free tier generous).
 Gemini secondary (only when Groq fails completely).
-Smarter quota detection — when daily limit hit, mark for 1 hour not 70 seconds.
+FIXED: Uses updated model names from settings.
+FIXED: Smarter quota detection.
 """
 
 from groq import Groq
@@ -29,15 +30,8 @@ def is_gemini_available() -> bool:
 
 
 def mark_gemini_limited(is_daily_limit: bool = False):
-    """
-    Marks Gemini as unavailable.
-    FIXED: If this is a daily limit (not just RPM), mark for 1 hour.
-    Per-minute limits reset in ~60 seconds, daily limits reset at midnight.
-    """
     try:
         from database.client import redis_client
-        # Daily quota exceeded: mark for 3600 seconds (1 hour)
-        # RPM exceeded: mark for 90 seconds
         ttl = 3600 if is_daily_limit else 90
         redis_client.setex("gemini_rate_limited", ttl, "1")
         if is_daily_limit:
@@ -47,7 +41,6 @@ def mark_gemini_limited(is_daily_limit: bool = False):
 
 
 async def get_student_deep_context(student: dict) -> dict:
-    """Gets rich context about a student for personalised responses."""
     from database.client import supabase
     from helpers import nigeria_today
 
@@ -102,7 +95,6 @@ async def get_student_deep_context(student: dict) -> dict:
 
 
 def build_system_prompt(student: dict, conversation: dict, deep_context: dict) -> str:
-    """Builds the complete system prompt for Wax."""
     from helpers import nigeria_today
 
     name = student.get('name', 'Student').split()[0]
@@ -161,7 +153,14 @@ STRONG AREAS:
 {strong_str}
 
 YOUR IDENTITY AND PERSONALITY:
-You are Wax. You speak like a brilliant older sibling who has already passed these exams. You are warm, direct, and genuinely invested in {name}'s success. You never sound like a robot. You never give the same response twice. You take initiative.
+You are Wax. You speak like a brilliant older sibling who has already passed these exams and wants to help. You are warm, direct, real. You never sound like a robot. You never give the same response twice. You take initiative.
+
+CRITICAL PERSONALITY RULES:
+1. Be conversational. Sound like a real person texting. Not a script.
+2. When a student says "I have forgotten" or "I don't know" — EXPLAIN IT. Never show a help menu for academic questions.
+3. When a student asks about a subject topic — explain it properly with a Nigerian example.
+4. Only show commands/menu when the student explicitly asks "what can you do" or "help".
+5. Never respond with just a list of commands to a genuine academic question.
 
 WHAT YOU KNOW AND CAN DO:
 1. Teach any topic in the Nigerian secondary school curriculum (JAMB, WAEC, NECO)
@@ -210,9 +209,6 @@ async def process_message_with_ai(
     conversation: dict,
     conversation_history: list
 ) -> str:
-    """
-    Main function. Groq primary, Gemini secondary (only when Groq completely fails).
-    """
     deep_context = await get_student_deep_context(student)
     system_prompt = build_system_prompt(student, conversation, deep_context)
 
@@ -258,7 +254,7 @@ async def process_message_with_ai(
     except Exception as e:
         print(f"Groq fast error: {e}")
 
-    # Try Gemini only as last resort (both Groq models failed)
+    # Try Gemini only as last resort
     if is_gemini_available():
         try:
             import google.generativeai as genai
@@ -295,7 +291,6 @@ async def process_message_with_ai(
         except Exception as e:
             err = str(e)
             print(f"Gemini error: {err[:200]}")
-            # FIXED: Detect daily quota vs per-minute quota for appropriate cooldown
             is_daily = (
                 "GenerateRequestsPerDayPerProjectPerModel" in err or
                 "quota_id" in err and "Day" in err or
@@ -308,7 +303,6 @@ async def process_message_with_ai(
 
 
 def _smart_fallback(message: str, student: dict, deep_context: dict) -> str:
-    """Context-aware fallback when all AI fails."""
     name = student.get('name', 'Student').split()[0]
     msg_lower = message.lower().strip()
     subjects = student.get('subjects', [])
@@ -320,14 +314,12 @@ def _smart_fallback(message: str, student: dict, deep_context: dict) -> str:
     days_left = deep_context.get('days_until_exam', 0)
     weak_topics = deep_context.get('weak_topics', [])
 
-    # Greeting
     if any(w in msg_lower for w in ['hi', 'hello', 'hey', 'good morning', 'good evening', 'sup']):
         streak_line = f"Your {streak}-day streak is alive!" if streak > 1 else "Let's start a new streak today."
         days_line = f"{days_left} days to {target_exam}." if days_left > 0 else ""
         weak_line = f"Your weakest area right now is {weak_topics[0]}. That's our focus today." if weak_topics else f"Tell me which {target_exam} subject you want to tackle."
         return f"Hey {name}! {streak_line} {days_line}\n\n{weak_line}"
 
-    # Quiz
     if any(w in msg_lower for w in ['quiz', 'test', 'question', 'practice']):
         subject = subjects[0] if subjects else 'Mathematics'
         for s in subjects:
@@ -339,7 +331,6 @@ def _smart_fallback(message: str, student: dict, deep_context: dict) -> str:
             f"_(Brief delay — ask again in 20 seconds if nothing comes)_"
         )
 
-    # Subscription
     if any(w in msg_lower for w in ['subscribe', 'upgrade', 'pay', 'plan', 'payment']):
         return (
             f"Great that you want to upgrade, {name}!\n\n"
@@ -349,7 +340,6 @@ def _smart_fallback(message: str, student: dict, deep_context: dict) -> str:
             f"Type *SUBSCRIBE* and then *SCHOLAR MONTHLY* to get your payment link."
         )
 
-    # University
     if any(w in msg_lower for w in ['university', 'admission', 'cut off', 'jamb score', 'confused', 'what should i do']):
         return (
             f"{name}, I hear you. A lot of students are in this exact situation.\n\n"
@@ -357,7 +347,6 @@ def _smart_fallback(message: str, student: dict, deep_context: dict) -> str:
             f"I know the Nigerian university system well and can help you think through your options."
         )
 
-    # Progress
     if any(w in msg_lower for w in ['progress', 'stats', 'how am i', 'score']):
         return (
             f"*{name}'s Progress*\n\n"
@@ -367,7 +356,6 @@ def _smart_fallback(message: str, student: dict, deep_context: dict) -> str:
             f"{'Focus: ' + weak_topics[0] if weak_topics else 'Keep going to identify patterns'}"
         )
 
-    # Varied defaults
     defaults = [
         f"I'm with you, {name}. My thinking is a bit slow right now — ask again in 30 seconds. What are we studying?",
         f"Got your message, {name}! Brief pause on my end. What subject do you want to tackle?",
@@ -378,7 +366,6 @@ def _smart_fallback(message: str, student: dict, deep_context: dict) -> str:
 
 
 async def process_admin_message(message: str, admin_phone: str) -> str:
-    """Natural language admin interface using Groq."""
     direct = await _handle_admin_natural(message)
     if direct:
         return direct
@@ -410,7 +397,6 @@ async def process_admin_message(message: str, admin_phone: str) -> str:
 
 
 async def _handle_admin_natural(message: str):
-    """Direct keyword admin responses."""
     msg = message.lower().strip()
 
     if any(w in msg for w in ['stats', 'how many', 'numbers', 'overview']):
@@ -458,7 +444,6 @@ async def _handle_admin_natural(message: str):
 
 
 async def _get_admin_stats() -> str:
-    """Current platform stats for admin only."""
     from database.client import supabase, redis_client
     from helpers import nigeria_today
     from config.settings import settings
