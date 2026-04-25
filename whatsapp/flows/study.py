@@ -1,14 +1,15 @@
 """
 Study Flow — The Main Learning Experience
-FIXED: Removed broken utils.helpers import
-FIXED: Circular import resolved — award_badge now from features.badges
+FIXED: Removed double messages when no questions in bank
+FIXED: Question generation now uses Groq fallback via gemini_client
+FIXED: Session questions resets properly each day
+FIXED: Challenge answer routing cleaned up
 """
 
 from whatsapp.sender import send_whatsapp_message
 from database.conversations import update_conversation_state, get_conversation_history
 from ai.router import route_and_respond
 from ai.prompts import get_main_tutor_prompt
-from ai.classifier import classify_message_fast
 from features.quiz_engine import (
     get_question_for_student, format_question_for_whatsapp,
     evaluate_quiz_answer, update_mastery_after_answer,
@@ -30,10 +31,6 @@ async def handle_study_message(
     message: str,
     intent: str
 ):
-    """
-    Main entry point for study-related messages.
-    Routes to the appropriate study handler based on intent and mode.
-    """
     state = conversation.get('conversation_state', {})
     current_mode = conversation.get('current_mode', 'default')
     awaiting = state.get('awaiting_response_for')
@@ -106,10 +103,6 @@ async def handle_academic_message(
     message: str,
     intent: str
 ):
-    """
-    Sends an academic message to the AI and returns the response.
-    This handles the core learn/explain/help functions.
-    """
     current_mode = conversation.get('current_mode', 'default')
 
     msg_upper = message.strip().upper()
@@ -158,11 +151,6 @@ async def handle_quiz_answer(
     message: str,
     state: dict
 ):
-    """
-    Handles a student's answer during a quiz session.
-    FIXED: award_badge now from features.badges to avoid circular import.
-    """
-    # FIXED: Import from features.badges, not from whatsapp.handler
     from features.badges import award_badge
 
     current_question = state.get('current_question')
@@ -170,7 +158,7 @@ async def handle_quiz_answer(
     if not current_question:
         await send_whatsapp_message(
             phone,
-            "I lost track of the question! Let me get you a new one.\n\nWhat subject were you practicing?"
+            "I lost track of the question! What subject were you practicing? Ask me again."
         )
         await update_conversation_state(conversation['id'], 'whatsapp', phone, {
             'conversation_state': {}
@@ -217,11 +205,10 @@ async def handle_quiz_answer(
     if session_q % 5 == 0 and session_q > 0:
         accuracy = round((session_correct / session_q) * 100)
         full_feedback += (
-            f"\n\nSession Summary:\n"
-            f"{session_q} questions | {session_correct} correct | {accuracy}%"
+            f"\n\nSession so far: {session_q} questions | {session_correct} correct | {accuracy}%"
         )
 
-    full_feedback += "\n\n_Type NEXT for another question, or ask me anything to switch topics._"
+    full_feedback += "\n\nType NEXT for another question, or ask me anything to switch topics."
 
     await send_whatsapp_message(phone, full_feedback)
 
@@ -245,8 +232,12 @@ async def deliver_quiz_question(
     topic: str,
     state: dict
 ):
-    """Gets and delivers a quiz question to the student."""
-    from database.questions import get_student_recently_seen_questions, record_question_seen
+    """
+    Gets and delivers a quiz question to the student.
+    FIXED: No more double messages. One flow, one outcome.
+    Tries database first, then generates via AI (Groq fallback included).
+    """
+    from database.questions import record_question_seen
 
     question = await get_question_for_student(
         student_id=student['id'],
@@ -256,13 +247,7 @@ async def deliver_quiz_question(
     )
 
     if not question:
-        await send_whatsapp_message(
-            phone,
-            f"I'm still building my {subject} question bank!\n\n"
-            f"Let me generate a fresh question just for you...\n\n"
-            f"This uses AI to create exam-quality questions."
-        )
-
+        # No question in database — generate one (Groq fallback built into gemini_client)
         from ai.gemini_client import generate_questions_with_gemini
         questions = await generate_questions_with_gemini(
             subject=subject,
@@ -275,10 +260,11 @@ async def deliver_quiz_question(
         if questions:
             question = questions[0]
         else:
+            # Both database and generation failed
             await send_whatsapp_message(
                 phone,
-                f"I couldn't generate a {subject} question right now.\n\n"
-                f"Try a different subject, or ask me to LEARN {subject} first."
+                f"I couldn't get a {subject} question right now, something is off on my end.\n\n"
+                f"Try asking me to LEARN {subject} first, or try a different subject for now."
             )
             return
 
@@ -302,8 +288,6 @@ async def deliver_quiz_question(
 
 
 async def handle_daily_challenge(phone: str, student: dict, conversation: dict):
-    """Handles the CHALLENGE command — shows today's daily challenge."""
-
     challenge = await get_todays_challenge()
 
     if not challenge:
@@ -329,7 +313,7 @@ async def handle_daily_challenge(phone: str, student: dict, conversation: dict):
             f"Results so far:\n"
             f"Total attempts: {total_attempts}\n"
             f"Got it right: {total_correct} ({correct_rate}%)\n\n"
-            f"Come back tomorrow at 8 AM for a new challenge!"
+            f"Come back tomorrow at 8 AM for a new one!"
         )
         return
 
@@ -352,11 +336,6 @@ async def handle_challenge_answer(
     message: str,
     state: dict
 ):
-    """
-    Handles a student's answer to the daily challenge.
-    FIXED: award_badge now from features.badges to avoid circular import.
-    """
-    # FIXED: Import from features.badges, not from whatsapp.handler
     from features.badges import award_badge
 
     challenge = state.get('current_challenge')
