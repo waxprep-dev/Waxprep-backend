@@ -21,8 +21,14 @@ class Settings:
 
     GROQ_FAST_MODEL = "llama-3.1-8b-instant"
     GROQ_SMART_MODEL = "llama-3.3-70b-versatile"
-    GEMINI_MODEL = "gemini-2.0-flash"
+
+    # FIXED: gemini-2.0-flash has limit:0 on free tier in this project.
+    # gemini-1.5-flash has 1500 requests/day free tier confirmed.
+    # gemini-1.5-flash-8b is the most generous free tier option.
+    GEMINI_MODEL = "gemini-1.5-flash"
     GEMINI_PRO_MODEL = "gemini-1.5-pro"
+    GEMINI_FAST_MODEL = "gemini-1.5-flash-8b"
+
     OPENAI_VISION_MODEL = "gpt-4o-mini"
 
     WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
@@ -83,7 +89,6 @@ class Settings:
     SESSION_TIMEOUT_MINUTES = 30
     SESSION_RESUME_WINDOW_HOURS = 6
 
-    # FIXED: Changed from waxprep.ng (dead domain) to live GitHub Pages URL
     TERMS_URL = "https://waxprep-dev.github.io/Waxprep-backend/terms.html"
     PRIVACY_URL = "https://waxprep-dev.github.io/Waxprep-backend/terms.html"
 
