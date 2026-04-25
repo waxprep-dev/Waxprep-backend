@@ -1,7 +1,9 @@
 """
 WhatsApp Message Handler
-FIXED: Correct function names, proper student lookup, no circular imports
-ADDED: Streak updating logic, level up detection, total_questions_correct tracking
+FIXED: Subscription plan selection routing (SCHOLAR MONTHLY now works)
+FIXED: PAYG routing
+FIXED: Natural language command routing (study plan, report bug etc)
+ADDED: Streak updating, level up detection, total_questions_correct tracking
 """
 from config.settings import settings
 from helpers import nigeria_today, get_time_of_day, sanitize_input
@@ -198,6 +200,58 @@ async def process_message(phone: str, name: str, message: str, message_type: str
         await _handle_voice_message(phone, student, media_id)
         return
 
+    # ================================================================
+    # NATURAL LANGUAGE COMMAND DETECTION
+    # These check for natural phrasings BEFORE the AI classifier runs.
+    # The AI classifier often misroutes these to HELP_REQUEST or UNKNOWN.
+    # ================================================================
+    msg_lower = message.strip().lower()
+
+    # Natural language bug reporting: "report a bug", "there is a bug" etc
+    if any(phrase in msg_lower for phrase in ['report a bug', 'report bug', 'found a bug', 'there is a bug', 'bug report']):
+        from features.feedback import handle_feedback_command
+        response = await handle_feedback_command(phone, student, f"BUG {message}")
+        await send_whatsapp_message(phone, response)
+        return
+
+    # Natural language suggestions
+    if any(phrase in msg_lower for phrase in ['i have a suggestion', 'my suggestion', 'i suggest', 'feature request']):
+        from features.feedback import handle_feedback_command
+        response = await handle_feedback_command(phone, student, f"SUGGEST {message}")
+        await send_whatsapp_message(phone, response)
+        return
+
+    # Natural language study plan request
+    if any(phrase in msg_lower for phrase in ['study plan', 'show my plan', 'my plan', 'show plan']):
+        from whatsapp.flows.commands import handle_plan
+        await handle_plan(phone, student, conversation, message)
+        return
+
+    # Natural language progress request
+    if any(phrase in msg_lower for phrase in ['my progress', 'show my progress', 'how am i doing', 'my stats', 'my profile']):
+        from whatsapp.flows.commands import handle_progress
+        await handle_progress(phone, student, conversation, message)
+        return
+
+    # ================================================================
+    # SUBSCRIPTION PLAN SELECTION — MUST BE BEFORE AI CLASSIFIER
+    # FIXED: "SCHOLAR MONTHLY" was being caught by PAYMENT_INQUIRY intent
+    # and then wrongly returning "You are already on trial" to the student.
+    # This explicit check intercepts subscription plan selections first.
+    # ================================================================
+    SUBSCRIPTION_PLAN_KEYWORDS = [
+        'SCHOLAR MONTHLY', 'SCHOLAR YEARLY', 'SCHOLAR ANNUAL',
+        'PRO MONTHLY', 'PRO YEARLY', 'PRO ANNUAL',
+        'ELITE MONTHLY', 'ELITE YEARLY', 'ELITE ANNUAL',
+    ]
+    if any(kw in msg_upper for kw in SUBSCRIPTION_PLAN_KEYWORDS):
+        from whatsapp.flows.subscription import handle_subscription_flow
+        await handle_subscription_flow(phone, student, conversation, message)
+        return
+
+    # ================================================================
+    # EXPLICIT COMMAND ROUTING
+    # ================================================================
     command = msg_upper.split()[0] if msg_upper else ''
 
     COMMANDS = {
@@ -213,13 +267,16 @@ async def process_message(phone: str, name: str, message: str, message_type: str
 
     if msg_upper in ['QUIZ', 'EXAM', 'LEARN', 'REVISION', 'CHALLENGE'] or \
        msg_upper.startswith('QUIZ ') or msg_upper.startswith('LEARN ') or \
-       msg_upper.startswith('PRACTICE '):
+       msg_upper.startswith('PRACTICE ') or msg_upper.startswith('REVISION '):
         from whatsapp.flows.study import handle_study_message
         from ai.classifier import classify_message_fast
         intent = classify_message_fast(message, conv_state)
         await handle_study_message(phone, student, conversation, message, intent)
         return
 
+    # ================================================================
+    # AI CLASSIFICATION — for everything that doesn't match above
+    # ================================================================
     from ai.classifier import classify_message_fast
     intent = classify_message_fast(message, conv_state)
 
@@ -241,6 +298,9 @@ async def process_message(phone: str, name: str, message: str, message_type: str
         await _increment_and_maybe_prompt_feedback(phone, student, conversation)
 
     elif intent == 'PAYMENT_INQUIRY':
+        # FIXED: Only reach _handle_payment_inquiry for genuine payment questions
+        # like "how much does it cost" or "how do I pay".
+        # Specific plan selections (SCHOLAR MONTHLY etc) are caught above.
         response = await _handle_payment_inquiry(student)
         await send_whatsapp_message(phone, response)
 
@@ -271,14 +331,12 @@ async def _increment_and_maybe_prompt_feedback(phone: str, student: dict, conver
     """
     Increments question count, updates streak, checks level up,
     and shows feedback prompt every 5 questions.
-    ADDED: Full streak logic, level-up detection, total_questions_answered tracking.
     """
     from database.students import increment_questions_today
     from database.client import supabase
 
     await increment_questions_today(student['id'])
 
-    # Update total questions answered
     try:
         supabase.table('students').update({
             'total_questions_answered': student.get('total_questions_answered', 0) + 1
@@ -286,7 +344,7 @@ async def _increment_and_maybe_prompt_feedback(phone: str, student: dict, conver
     except Exception as e:
         print(f"total_questions_answered update error (non-critical): {e}")
 
-    # ADDED: Streak updating logic
+    # Streak updating
     try:
         from helpers import nigeria_today
         from datetime import datetime, timedelta
@@ -309,17 +367,14 @@ async def _increment_and_maybe_prompt_feedback(phone: str, student: dict, conver
             new_streak = current_streak
 
             if last_date == today:
-                # Already studied today — no change needed
                 pass
             elif last_date == yesterday:
-                # Consecutive day — increment streak
                 new_streak = current_streak + 1
                 new_longest = max(longest_streak, new_streak)
                 streak_updates['current_streak'] = new_streak
                 streak_updates['longest_streak'] = new_longest
                 streak_updates['last_study_date'] = today
             else:
-                # Streak broken or brand new student
                 new_streak = 1
                 streak_updates['current_streak'] = 1
                 streak_updates['last_study_date'] = today
@@ -327,7 +382,6 @@ async def _increment_and_maybe_prompt_feedback(phone: str, student: dict, conver
             if streak_updates:
                 supabase.table('students').update(streak_updates).eq('id', student['id']).execute()
 
-            # Check for streak milestone badges and notify
             streak_milestones = {3, 7, 14, 30, 60, 100}
             if new_streak in streak_milestones and last_date != today:
                 try:
@@ -347,7 +401,7 @@ async def _increment_and_maybe_prompt_feedback(phone: str, student: dict, conver
     except Exception as streak_err:
         print(f"Streak update error (non-critical): {streak_err}")
 
-    # ADDED: Level up check
+    # Level up check
     try:
         await _check_and_update_level(student['id'], phone)
     except Exception as level_err:
@@ -378,11 +432,7 @@ async def _increment_and_maybe_prompt_feedback(phone: str, student: dict, conver
 
 
 async def _check_and_update_level(student_id: str, phone: str):
-    """
-    Checks if a student has earned enough points to level up.
-    Sends a celebration message if they leveled up.
-    ADDED: This function was completely missing before — no students ever leveled up.
-    """
+    """Checks if a student has earned enough points to level up."""
     from database.client import supabase
     from config.settings import settings
     from whatsapp.sender import send_whatsapp_message
@@ -399,7 +449,6 @@ async def _check_and_update_level(student_id: str, phone: str):
         points = s.get('total_points', 0)
         current_level = s.get('current_level', 1)
 
-        # Find the highest level this student qualifies for
         new_level = 1
         for level, threshold in sorted(settings.LEVEL_THRESHOLDS.items()):
             if points >= threshold:
@@ -425,10 +474,7 @@ async def _check_and_update_level(student_id: str, phone: str):
 
 
 async def _handle_quiz_answer(phone: str, student: dict, conversation: dict, message: str, state: dict):
-    """
-    Handles a student's answer during a quiz session.
-    ADDED: Now updates total_questions_correct properly.
-    """
+    """Handles a student's answer during a quiz session."""
     from whatsapp.sender import send_whatsapp_message
     from features.quiz_engine import evaluate_quiz_answer, update_mastery_after_answer, calculate_and_award_points
     from database.questions import update_question_stats
@@ -469,13 +515,12 @@ async def _handle_quiz_answer(phone: str, student: dict, conversation: dict, mes
     if current_question.get('id'):
         await update_question_stats(current_question['id'], is_correct)
 
-    # ADDED: Update total_questions_correct when answer is correct
+    # Update total_questions_correct
     try:
-        update_data = {}
         if is_correct:
-            update_data['total_questions_correct'] = student.get('total_questions_correct', 0) + 1
-        if update_data:
-            supabase.table('students').update(update_data).eq('id', student['id']).execute()
+            supabase.table('students').update({
+                'total_questions_correct': student.get('total_questions_correct', 0) + 1
+            }).eq('id', student['id']).execute()
     except Exception as e:
         print(f"total_questions_correct update error (non-critical): {e}")
 
@@ -570,11 +615,7 @@ async def _handle_image_message(phone: str, student: dict, media_id: str, captio
         await send_whatsapp_message(
             phone,
             "I had trouble reading that image.\n\n"
-            "Please try:\n"
-            "Taking a clearer photo in good lighting\n"
-            "Making sure the text is clearly visible\n"
-            "Sending just one page at a time\n\n"
-            "Or type your question and I will help immediately!"
+            "Please try taking a clearer photo in good lighting, or type your question."
         )
 
 
@@ -631,21 +672,23 @@ async def _handle_greeting(student: dict, phone: str) -> str:
 
 
 async def _handle_payment_inquiry(student: dict) -> str:
-    """Handle subscription questions with correct pricing."""
+    """Handle genuine payment questions — not plan selections."""
     from config.settings import settings
     name = student.get('name', 'Student').split()[0]
     tier = student.get('subscription_tier', 'free')
     is_trial = student.get('is_trial_active', False)
 
-    if tier != 'free' or is_trial:
-        plan = 'Full Trial Access' if is_trial else tier.capitalize()
+    # FIXED: Only show current plan info if genuinely asking "what plan am I on"
+    # NOT when they're trying to subscribe (that's caught before this is called)
+    if tier != 'free' and not is_trial:
+        plan = tier.capitalize()
         return (
-            f"You are on the {plan}, {name}!\n\n"
+            f"You are on the {plan} Plan, {name}!\n\n"
             "Type PROGRESS to see your full plan details, or SUBSCRIBE to change your plan."
         )
 
     return (
-        f"WaxPrep Plans\n\n"
+        f"WaxPrep Plans, {name}\n\n"
         f"Scholar Plan — N1,500/month\n"
         f"100 questions per day\n"
         f"Image analysis (send photos of textbooks)\n"
@@ -661,7 +704,8 @@ async def _handle_payment_inquiry(student: dict) -> str:
         f"N500 = 100 extra questions\n"
         f"N1,000 = 250 extra questions\n"
         f"N1,800 = 500 extra questions\n\n"
-        f"Type SUBSCRIBE to upgrade to a plan, or PAYG for question credits."
+        f"To subscribe: type SUBSCRIBE, then SCHOLAR MONTHLY or SCHOLAR YEARLY\n"
+        f"For question credits: type PAYG 100, PAYG 250, or PAYG 500"
     )
 
 
@@ -693,6 +737,6 @@ async def save_conversation_message(conversation_id: str, student_id: str, platf
 
 
 async def award_badge(student_id: str, badge_code: str) -> dict | None:
-    """Wrapper for backward compatibility — uses features.badges now."""
+    """Wrapper for backward compatibility."""
     from features.badges import award_badge as _award_badge
     return await _award_badge(student_id, badge_code)
