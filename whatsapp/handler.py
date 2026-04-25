@@ -1,8 +1,11 @@
 """
 WhatsApp Message Handler
-FIXED: Subscription plan selection routing (SCHOLAR MONTHLY now works)
+FIXED: HELP_REQUEST no longer shows help menu for academic questions
+FIXED: Greeting no longer appends redundant question
+FIXED: Session questions counter resets each day
+FIXED: Subscription plan selection routing
 FIXED: PAYG routing
-FIXED: Natural language command routing (study plan, report bug etc)
+FIXED: Natural language command routing
 ADDED: Streak updating, level up detection, total_questions_correct tracking
 """
 from config.settings import settings
@@ -11,7 +14,6 @@ import random
 
 
 async def process_single_message(message_data: dict, value: dict) -> None:
-    """Entry point called by main.py."""
     from whatsapp.sender import send_whatsapp_message
     phone = message_data.get('from', '')
     message_id = message_data.get('id', '')
@@ -83,7 +85,6 @@ async def process_single_message(message_data: dict, value: dict) -> None:
 
 
 async def process_message(phone: str, name: str, message: str, message_type: str = 'text', media_id: str = None) -> None:
-    """Main message router. All WhatsApp messages pass through here."""
     from whatsapp.sender import send_whatsapp_message
     from features.wax_id import student_exists_in_platform
     from database.conversations import get_or_create_conversation, save_message, get_conversation_history
@@ -135,6 +136,14 @@ async def process_message(phone: str, name: str, message: str, message_type: str
             conv_state = json.loads(conv_state)
         except Exception:
             conv_state = {}
+
+    # RESET session counter if it's a new day
+    today = nigeria_today()
+    last_session_date = conv_state.get('session_date', '')
+    if last_session_date != today:
+        conv_state['session_questions'] = 0
+        conv_state['session_correct'] = 0
+        conv_state['session_date'] = today
 
     awaiting = conv_state.get('awaiting_response_for', '')
     current_mode = conversation.get('current_mode', 'default')
@@ -200,45 +209,32 @@ async def process_message(phone: str, name: str, message: str, message_type: str
         await _handle_voice_message(phone, student, media_id)
         return
 
-    # ================================================================
-    # NATURAL LANGUAGE COMMAND DETECTION
-    # These check for natural phrasings BEFORE the AI classifier runs.
-    # The AI classifier often misroutes these to HELP_REQUEST or UNKNOWN.
-    # ================================================================
     msg_lower = message.strip().lower()
 
-    # Natural language bug reporting: "report a bug", "there is a bug" etc
+    # Natural language feedback routing
     if any(phrase in msg_lower for phrase in ['report a bug', 'report bug', 'found a bug', 'there is a bug', 'bug report']):
         from features.feedback import handle_feedback_command
         response = await handle_feedback_command(phone, student, f"BUG {message}")
         await send_whatsapp_message(phone, response)
         return
 
-    # Natural language suggestions
     if any(phrase in msg_lower for phrase in ['i have a suggestion', 'my suggestion', 'i suggest', 'feature request']):
         from features.feedback import handle_feedback_command
         response = await handle_feedback_command(phone, student, f"SUGGEST {message}")
         await send_whatsapp_message(phone, response)
         return
 
-    # Natural language study plan request
     if any(phrase in msg_lower for phrase in ['study plan', 'show my plan', 'my plan', 'show plan']):
         from whatsapp.flows.commands import handle_plan
         await handle_plan(phone, student, conversation, message)
         return
 
-    # Natural language progress request
     if any(phrase in msg_lower for phrase in ['my progress', 'show my progress', 'how am i doing', 'my stats', 'my profile']):
         from whatsapp.flows.commands import handle_progress
         await handle_progress(phone, student, conversation, message)
         return
 
-    # ================================================================
-    # SUBSCRIPTION PLAN SELECTION — MUST BE BEFORE AI CLASSIFIER
-    # FIXED: "SCHOLAR MONTHLY" was being caught by PAYMENT_INQUIRY intent
-    # and then wrongly returning "You are already on trial" to the student.
-    # This explicit check intercepts subscription plan selections first.
-    # ================================================================
+    # Subscription plan selection — must be before classifier
     SUBSCRIPTION_PLAN_KEYWORDS = [
         'SCHOLAR MONTHLY', 'SCHOLAR YEARLY', 'SCHOLAR ANNUAL',
         'PRO MONTHLY', 'PRO YEARLY', 'PRO ANNUAL',
@@ -249,9 +245,7 @@ async def process_message(phone: str, name: str, message: str, message_type: str
         await handle_subscription_flow(phone, student, conversation, message)
         return
 
-    # ================================================================
-    # EXPLICIT COMMAND ROUTING
-    # ================================================================
+    # Explicit command routing
     command = msg_upper.split()[0] if msg_upper else ''
 
     COMMANDS = {
@@ -274,9 +268,7 @@ async def process_message(phone: str, name: str, message: str, message_type: str
         await handle_study_message(phone, student, conversation, message, intent)
         return
 
-    # ================================================================
-    # AI CLASSIFICATION — for everything that doesn't match above
-    # ================================================================
+    # AI Classification for everything else
     from ai.classifier import classify_message_fast
     intent = classify_message_fast(message, conv_state)
 
@@ -295,18 +287,32 @@ async def process_message(phone: str, name: str, message: str, message_type: str
         from whatsapp.flows.study import handle_study_message
         await handle_study_message(phone, student, conversation, message, intent)
 
-        await _increment_and_maybe_prompt_feedback(phone, student, conversation)
+        await _increment_and_maybe_prompt_feedback(phone, student, conversation, conv_state)
 
     elif intent == 'PAYMENT_INQUIRY':
-        # FIXED: Only reach _handle_payment_inquiry for genuine payment questions
-        # like "how much does it cost" or "how do I pay".
-        # Specific plan selections (SCHOLAR MONTHLY etc) are caught above.
         response = await _handle_payment_inquiry(student)
         await send_whatsapp_message(phone, response)
 
-    elif intent in ['COMMAND', 'HELP_REQUEST']:
-        from whatsapp.flows.commands import handle_command
-        await handle_command(phone, student, conversation, message, 'HELP')
+    elif intent == 'HELP_REQUEST':
+        # FIXED: HELP_REQUEST used to always show the full help menu.
+        # Now it routes to AI because "I have forgotten" or "I don't understand" 
+        # or "explain this" are academic requests, not command requests.
+        # Only show the help menu if the student literally asks "what commands do you have"
+        # or "how do I use this" type questions.
+        help_keywords = ['what commands', 'how do i use', 'what can you do', 'list commands',
+                        'show commands', 'all commands', 'what do i type', 'how does this work']
+        if any(k in msg_lower for k in help_keywords):
+            from whatsapp.flows.commands import handle_command
+            await handle_command(phone, student, conversation, message, 'HELP')
+        else:
+            # Route to AI — it will handle "I have forgotten", "explain this", etc naturally
+            can_ask, limit_msg = await _check_question_limit(student)
+            if not can_ask:
+                await send_whatsapp_message(phone, limit_msg)
+                return
+            from whatsapp.flows.study import handle_study_message
+            await handle_study_message(phone, student, conversation, message, 'ACADEMIC_QUESTION')
+            await _increment_and_maybe_prompt_feedback(phone, student, conversation, conv_state)
 
     elif intent == 'CASUAL_CHAT':
         response = await _handle_casual_chat(message, student)
@@ -317,20 +323,26 @@ async def process_message(phone: str, name: str, message: str, message_type: str
         await handle_promo_code(phone, student, conversation, message)
 
     else:
+        # Unknown — route to AI, it will handle it
+        can_ask, limit_msg = await _check_question_limit(student)
+        if not can_ask:
+            await send_whatsapp_message(phone, limit_msg)
+            return
         from whatsapp.flows.study import handle_study_message
         await handle_study_message(phone, student, conversation, message, intent)
+        await _increment_and_maybe_prompt_feedback(phone, student, conversation, conv_state)
 
 
 async def _check_question_limit(student: dict) -> tuple:
-    """Returns (can_ask, message) after checking daily limits."""
     from database.students import can_student_ask_question
     return await can_student_ask_question(student)
 
 
-async def _increment_and_maybe_prompt_feedback(phone: str, student: dict, conversation: dict):
+async def _increment_and_maybe_prompt_feedback(phone: str, student: dict, conversation: dict, conv_state: dict = None):
     """
     Increments question count, updates streak, checks level up,
     and shows feedback prompt every 5 questions.
+    FIXED: Uses passed conv_state to avoid stale session counts.
     """
     from database.students import increment_questions_today
     from database.client import supabase
@@ -401,38 +413,35 @@ async def _increment_and_maybe_prompt_feedback(phone: str, student: dict, conver
     except Exception as streak_err:
         print(f"Streak update error (non-critical): {streak_err}")
 
-    # Level up check
     try:
         await _check_and_update_level(student['id'], phone)
     except Exception as level_err:
         print(f"Level check error (non-critical): {level_err}")
 
-    conv_state = conversation.get('conversation_state', {})
-    session_questions = conv_state.get('session_questions', 0) + 1
+    # Use the conv_state passed in (already reset for today)
+    state = conv_state or {}
+    session_questions = state.get('session_questions', 0) + 1
 
     from database.conversations import update_conversation_state
-    await update_conversation_state(conversation['id'], 'whatsapp', phone, {
-        'conversation_state': {
-            **conv_state,
-            'session_questions': session_questions,
-        }
-    })
+    today = nigeria_today()
+
+    new_state = {
+        **state,
+        'session_questions': session_questions,
+        'session_date': today,
+    }
 
     if session_questions > 0 and session_questions % 5 == 0:
         from features.feedback import send_session_feedback_prompt
         await send_session_feedback_prompt(phone, student, session_questions)
+        new_state['awaiting_response_for'] = 'awaiting_feedback'
 
-        await update_conversation_state(conversation['id'], 'whatsapp', phone, {
-            'conversation_state': {
-                **conv_state,
-                'session_questions': session_questions,
-                'awaiting_response_for': 'awaiting_feedback',
-            }
-        })
+    await update_conversation_state(conversation['id'], 'whatsapp', phone, {
+        'conversation_state': new_state
+    })
 
 
 async def _check_and_update_level(student_id: str, phone: str):
-    """Checks if a student has earned enough points to level up."""
     from database.client import supabase
     from config.settings import settings
     from whatsapp.sender import send_whatsapp_message
@@ -474,7 +483,6 @@ async def _check_and_update_level(student_id: str, phone: str):
 
 
 async def _handle_quiz_answer(phone: str, student: dict, conversation: dict, message: str, state: dict):
-    """Handles a student's answer during a quiz session."""
     from whatsapp.sender import send_whatsapp_message
     from features.quiz_engine import evaluate_quiz_answer, update_mastery_after_answer, calculate_and_award_points
     from database.questions import update_question_stats
@@ -487,7 +495,7 @@ async def _handle_quiz_answer(phone: str, student: dict, conversation: dict, mes
     if not current_question:
         await send_whatsapp_message(
             phone,
-            "I lost track of the question! Let me get you a new one.\n\nWhat subject were you practicing?"
+            "I lost track of the question! What subject were you practicing? Ask me again."
         )
         await update_conversation_state(conversation['id'], 'whatsapp', phone, {
             'conversation_state': {}
@@ -515,7 +523,6 @@ async def _handle_quiz_answer(phone: str, student: dict, conversation: dict, mes
     if current_question.get('id'):
         await update_question_stats(current_question['id'], is_correct)
 
-    # Update total_questions_correct
     try:
         if is_correct:
             supabase.table('students').update({
@@ -552,22 +559,23 @@ async def _handle_quiz_answer(phone: str, student: dict, conversation: dict, mes
 
     await send_whatsapp_message(phone, full_feedback)
 
+    today = nigeria_today()
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {
         'conversation_state': {
             **state,
             'awaiting_response_for': 'quiz_continue',
             'session_questions': session_q,
             'session_correct': session_correct,
+            'session_date': today,
             'last_question': current_question,
             'current_question': None,
         }
     })
 
-    await _increment_and_maybe_prompt_feedback(phone, student, conversation)
+    await _increment_and_maybe_prompt_feedback(phone, student, conversation, state)
 
 
 async def _handle_image_message(phone: str, student: dict, media_id: str, caption: str):
-    """Handles image uploads."""
     from whatsapp.sender import send_whatsapp_message
     from database.students import get_student_subscription_status
     status = await get_student_subscription_status(student)
@@ -620,7 +628,6 @@ async def _handle_image_message(phone: str, student: dict, media_id: str, captio
 
 
 async def _handle_voice_message(phone: str, student: dict, media_id: str):
-    """Handles voice notes."""
     from whatsapp.sender import send_whatsapp_message
     name = student.get('name', 'Student').split()[0]
     await send_whatsapp_message(
@@ -632,7 +639,11 @@ async def _handle_voice_message(phone: str, student: dict, media_id: str):
 
 
 async def _handle_greeting(student: dict, phone: str) -> str:
-    """Handle greetings with context."""
+    """
+    Handle greetings with context.
+    FIXED: No longer appends a second question. The greeting itself includes
+    what to do next, so we don't need a separate line.
+    """
     from database.client import supabase
     from helpers import get_time_of_day
     from ai.prompts import get_greeting
@@ -653,33 +664,23 @@ async def _handle_greeting(student: dict, phone: str) -> str:
                 w = weak.data[0]
                 return (
                     f"{greeting}\n\n"
-                    f"You haven't studied today yet. Want to work on {w['topic']} in {w['subject']}? "
-                    f"It's one of your focus areas right now.\n\n"
-                    "Or tell me any subject you want to tackle today!"
+                    f"You haven't studied today yet. Want to work on *{w['topic']}* in {w['subject']}? "
+                    f"It's one of your focus areas. Just say yes or tell me any subject you want."
                 )
         except Exception:
             pass
 
-        return (
-            f"{greeting}\n\n"
-            "Ready to study? What subject do you want to work on today?"
-        )
+        return f"{greeting}"
 
-    return (
-        f"{greeting}\n\n"
-        "Back for more! What do you want to work on next?"
-    )
+    return f"{greeting}"
 
 
 async def _handle_payment_inquiry(student: dict) -> str:
-    """Handle genuine payment questions — not plan selections."""
     from config.settings import settings
     name = student.get('name', 'Student').split()[0]
     tier = student.get('subscription_tier', 'free')
     is_trial = student.get('is_trial_active', False)
 
-    # FIXED: Only show current plan info if genuinely asking "what plan am I on"
-    # NOT when they're trying to subscribe (that's caught before this is called)
     if tier != 'free' and not is_trial:
         plan = tier.capitalize()
         return (
@@ -710,7 +711,6 @@ async def _handle_payment_inquiry(student: dict) -> str:
 
 
 async def _handle_casual_chat(message: str, student: dict) -> str:
-    """Handle casual chat with a study redirect."""
     from ai.brain import process_message_with_ai
     result = await process_message_with_ai(message, student, {}, [])
 
@@ -728,7 +728,6 @@ async def _handle_casual_chat(message: str, student: dict) -> str:
 
 
 async def save_conversation_message(conversation_id: str, student_id: str, platform: str, role: str, content: str):
-    """Saves a message to conversation history."""
     from database.conversations import save_message
     try:
         await save_message(conversation_id, student_id, platform, role, content)
@@ -737,6 +736,5 @@ async def save_conversation_message(conversation_id: str, student_id: str, platf
 
 
 async def award_badge(student_id: str, badge_code: str) -> dict | None:
-    """Wrapper for backward compatibility."""
     from features.badges import award_badge as _award_badge
     return await _award_badge(student_id, badge_code)
