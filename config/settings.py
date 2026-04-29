@@ -6,7 +6,7 @@ load_dotenv()
 
 class Settings:
     APP_NAME = "WaxPrep"
-    APP_VERSION = "2.0.0"
+    APP_VERSION = "3.0.0"
     ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
     SECRET_KEY = os.getenv("SECRET_KEY", "waxprep-change-this-in-production")
     ADMIN_WHATSAPP = os.getenv("ADMIN_WHATSAPP")
@@ -25,9 +25,12 @@ class Settings:
 
     GROQ_FAST_MODEL = "llama-3.1-8b-instant"
     GROQ_SMART_MODEL = "llama-3.3-70b-versatile"
+    GROQ_WHISPER_MODEL = "whisper-large-v3"
     GEMINI_MODEL = "gemini-1.5-flash-latest"
     GEMINI_PRO_MODEL = "gemini-1.5-pro-latest"
     OPENAI_VISION_MODEL = "gpt-4o-mini"
+    OPENAI_TTS_MODEL = "tts-1"
+    OPENAI_TTS_VOICE = "nova"
 
     # WhatsApp
     WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
@@ -48,30 +51,36 @@ class Settings:
     # Pricing (Naira)
     SCHOLAR_MONTHLY = 1500
     SCHOLAR_YEARLY = 15000
-    PRO_MONTHLY = 3000
-    PRO_YEARLY = 28800
-    ELITE_MONTHLY = 5000
-    ELITE_YEARLY = 48000
+    ELITE_MONTHLY = 3500
+    ELITE_YEARLY = 35000
 
-    # Pay-As-You-Go
+    # Pay-As-You-Go (kept for legacy, may phase out)
     PAYG_100_QUESTIONS = 500
     PAYG_250_QUESTIONS = 1000
     PAYG_500_QUESTIONS = 1800
 
-    # Question Limits Per Day
-    FREE_DAILY_QUESTIONS = 20
-    SCHOLAR_DAILY_QUESTIONS = 100
-    PRO_DAILY_QUESTIONS = 9999
-    ELITE_DAILY_QUESTIONS = 9999
-    TRIAL_DAILY_QUESTIONS = 9999
+    # Daily conversation turn limits
+    # A turn = one student message + one Wax response
+    # This replaces the old question counting model
+    FREE_DAILY_TURNS = 25
+    SCHOLAR_DAILY_TURNS = 99999
+    ELITE_DAILY_TURNS = 99999
+    TRIAL_DAILY_TURNS = 99999
 
-    DAILY_QUESTION_LIMITS = {
-        'free': 20,
-        'scholar': 100,
-        'pro': 9999,
-        'elite': 9999,
-        'trial': 9999,
+    DAILY_TURN_LIMITS = {
+        'free': 25,
+        'scholar': 99999,
+        'elite': 99999,
+        'trial': 99999,
     }
+
+    # Feature access by tier
+    # Which tiers can send voice notes and have them transcribed
+    VOICE_IN_TIERS = ['scholar', 'elite', 'trial']
+    # Which tiers can receive voice replies from Wax (future)
+    VOICE_OUT_TIERS = ['elite']
+    # Which tiers can send images for analysis
+    IMAGE_ANALYSIS_TIERS = ['scholar', 'elite', 'trial']
 
     # Trial Settings
     TRIAL_DURATION_DAYS = 7
@@ -89,15 +98,15 @@ class Settings:
     POINTS_REFERRAL_SIGNUP = 100
 
     # AI Budget
-    DAILY_AI_BUDGET_USD = 5.00
+    DAILY_AI_BUDGET_USD = 8.00
     AI_BUDGET_WARNING_THRESHOLD = 0.70
     AI_BUDGET_SHIFT_THRESHOLD = 0.85
 
     # Cache TTLs (seconds)
-    STUDENT_CACHE_TTL = 300        # 5 minutes
-    CONVERSATION_CACHE_TTL = 7200  # 2 hours
-    SESSION_CACHE_TTL = 1800       # 30 minutes
-    QUESTION_CACHE_TTL = 3600      # 1 hour
+    STUDENT_CACHE_TTL = 300
+    CONVERSATION_CACHE_TTL = 7200
+    SESSION_CACHE_TTL = 1800
+    QUESTION_CACHE_TTL = 3600
 
     # Session Settings
     SESSION_TIMEOUT_MINUTES = 30
@@ -122,10 +131,25 @@ class Settings:
     }
 
     @classmethod
-    def get_daily_question_limit(cls, tier: str, is_trial: bool) -> int:
+    def get_daily_turn_limit(cls, tier: str, is_trial: bool) -> int:
         if is_trial:
-            return cls.TRIAL_DAILY_QUESTIONS
-        return cls.DAILY_QUESTION_LIMITS.get(tier, cls.FREE_DAILY_QUESTIONS)
+            return cls.TRIAL_DAILY_TURNS
+        return cls.DAILY_TURN_LIMITS.get(tier, cls.FREE_DAILY_TURNS)
+
+    @classmethod
+    def can_use_voice_in(cls, tier: str, is_trial: bool) -> bool:
+        effective = 'trial' if is_trial else tier
+        return effective in cls.VOICE_IN_TIERS
+
+    @classmethod
+    def can_use_image_analysis(cls, tier: str, is_trial: bool) -> bool:
+        effective = 'trial' if is_trial else tier
+        return effective in cls.IMAGE_ANALYSIS_TIERS
+
+    @classmethod
+    def can_use_voice_out(cls, tier: str, is_trial: bool) -> bool:
+        effective = 'trial' if is_trial else tier
+        return effective in cls.VOICE_OUT_TIERS
 
     @classmethod
     def get_level_name(cls, level: int) -> str:
@@ -144,8 +168,6 @@ class Settings:
         prices = {
             ('scholar', 'monthly'): cls.SCHOLAR_MONTHLY,
             ('scholar', 'yearly'): cls.SCHOLAR_YEARLY,
-            ('pro', 'monthly'): cls.PRO_MONTHLY,
-            ('pro', 'yearly'): cls.PRO_YEARLY,
             ('elite', 'monthly'): cls.ELITE_MONTHLY,
             ('elite', 'yearly'): cls.ELITE_YEARLY,
         }
