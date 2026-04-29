@@ -1,28 +1,35 @@
 """
-Study Flow - Simplified
+Study Flow Utilities
 
-Most conversation logic now lives in handler.py and ai/brain.py.
-This file handles structured study flows: daily challenge, revision.
+The AI brain (Wax) handles all conversational teaching and quiz delivery.
+This module provides utility functions for structured features:
+- Daily challenge
+- Spaced repetition nudges
+
+Most of what was here before has been moved into the AI brain.
 """
 
 from whatsapp.sender import send_whatsapp_message
-from database.conversations import update_conversation_state, get_conversation_history
+from database.conversations import update_conversation_state
 from features.daily_challenge import (
     get_todays_challenge, has_student_attempted_today,
     format_daily_challenge, submit_challenge_answer
 )
 from database.client import supabase
 from helpers import nigeria_today
-from features.quiz_engine import extract_subject_from_message, extract_topic_from_message
 
 
 async def handle_daily_challenge(phone: str, student: dict, conversation: dict):
+    """Sends today's daily challenge question."""
     challenge = await get_todays_challenge()
 
     if not challenge:
+        name = student.get('name', 'Student').split()[0]
         await send_whatsapp_message(
             phone,
-            "Today's challenge hasn't dropped yet!\n\nDaily challenges go live at *8:00 AM Lagos time*. Come back then!"
+            f"Today's challenge hasn't dropped yet, {name}!\n\n"
+            "Daily challenges go live at 8:00 AM Lagos time. "
+            "Come back then and let's see if you can get it first."
         )
         return
 
@@ -32,11 +39,13 @@ async def handle_daily_challenge(phone: str, student: dict, conversation: dict):
         total = challenge.get('total_attempts', 0)
         correct = challenge.get('total_correct', 0)
         rate = round((correct / total * 100)) if total > 0 else 0
+        name = student.get('name', 'Student').split()[0]
         await send_whatsapp_message(
             phone,
-            f"You've already attempted today's challenge!\n\n"
-            f"So far: {total} attempts, {correct} got it right ({rate}%).\n\n"
-            f"New challenge drops tomorrow at 8 AM!"
+            f"You already took today's challenge, {name}!\n\n"
+            f"So far across all students: {total} attempts, {correct} correct ({rate}%).\n\n"
+            "New challenge drops tomorrow at 8 AM. "
+            "In the meantime, want to study something?"
         )
         return
 
@@ -61,7 +70,10 @@ async def handle_challenge_answer(phone: str, student: dict, conversation: dict,
 
     challenge = state.get('current_challenge')
     if not challenge:
-        await send_whatsapp_message(phone, "Lost the challenge question! Type CHALLENGE to get it again.")
+        await send_whatsapp_message(
+            phone,
+            "Lost track of the challenge question. Type *CHALLENGE* to get it again."
+        )
         return
 
     is_correct, feedback, points = await submit_challenge_answer(
@@ -75,6 +87,7 @@ async def handle_challenge_answer(phone: str, student: dict, conversation: dict,
         return
 
     await send_whatsapp_message(phone, feedback)
+
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {
         'conversation_state': {}
     })
@@ -93,13 +106,15 @@ async def handle_challenge_answer(phone: str, student: dict, conversation: dict,
 async def deliver_quiz_question(phone: str, student: dict, conversation: dict,
                                  subject: str, topic: str, state: dict):
     """
-    Delivers a quiz question. Called when there's a clear quiz request.
-    Uses database first, then AI generation with Groq fallback.
+    Utility function to fetch and deliver a question directly from the database.
+    Kept for cases where the scheduler or other systems need to push a question.
+    In normal conversation flow, Wax generates questions naturally.
     """
-    from features.quiz_engine import (get_question_for_student, format_question_for_whatsapp)
+    from features.quiz_engine import (
+        get_question_for_student, format_question_for_whatsapp
+    )
     from database.questions import record_question_seen
 
-    # Try database first
     question = await get_question_for_student(
         student_id=student['id'],
         subject=subject,
@@ -121,7 +136,8 @@ async def deliver_quiz_question(phone: str, student: dict, conversation: dict,
         else:
             await send_whatsapp_message(
                 phone,
-                f"Having trouble getting a {subject} question right now.\n\nTry asking me to explain a {subject} topic first, or try a different subject."
+                f"Having trouble getting a {subject} question right now. "
+                "Ask me to explain something and we will work from there."
             )
             return
 
@@ -134,12 +150,10 @@ async def deliver_quiz_question(phone: str, student: dict, conversation: dict,
 
     today = nigeria_today()
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {
-        'current_mode': 'quiz',
         'current_subject': subject,
         'current_topic': topic or question.get('topic', ''),
         'conversation_state': {
             **state,
-            'awaiting_response_for': 'quiz_answer',
             'current_question': question,
             'session_date': today,
         }
