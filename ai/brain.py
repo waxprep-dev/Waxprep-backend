@@ -2,14 +2,8 @@
 WaxPrep AI Brain
 
 The central intelligence. Everything goes through here.
-Philosophy: The AI handles all academic content naturally through conversation.
-No hard routing. Context is king.
-
-Speed optimizations:
-- Groq is primary (fastest, most generous free tier)
-- Gemini only for complex generation tasks
-- Parallel context fetch + AI call where possible
-- Cache-first approach for everything
+Wax is a teacher, not a question-answer machine.
+Context is king. Conversation is the medium. Teaching is the mission.
 """
 
 import re
@@ -51,17 +45,18 @@ async def think(
     conversation_history: list,
     recent_subject: str = None,
     context: dict = None,
+    quiz_context: dict = None,
 ) -> tuple[str, dict | None]:
     """
     Main AI thinking function.
 
+    quiz_context: If provided, this means the student just answered a quiz question.
+    It contains: question, student_answer, is_correct, explanation.
+    Wax will evaluate the answer naturally as part of the response.
+
     Returns:
         response_text: What to send the student
         question_data: Structured question data if a quiz was generated, else None
-
-    The AI handles all academic content, greetings, explanations, quiz generation,
-    and answer evaluation through a single unified interface.
-    Context is provided through conversation history and the student context dict.
     """
     from ai.prompts import get_wax_system_prompt
     from ai.context_manager import format_context_for_prompt
@@ -72,7 +67,7 @@ async def think(
 
     messages = [{"role": "system", "content": system_prompt}]
 
-    # Add conversation history (last 20 messages for context depth)
+    # Add conversation history (last 20 messages for depth)
     for msg in conversation_history[-20:]:
         role = msg.get("role", "user")
         if role not in ["user", "assistant"]:
@@ -81,16 +76,39 @@ async def think(
         if content:
             messages.append({"role": role, "content": content})
 
-    messages.append({"role": "user", "content": message})
+    # If this is a quiz answer evaluation, build context into the message
+    if quiz_context:
+        question_text = quiz_context.get('question', '')
+        student_answer = quiz_context.get('student_answer', '')
+        is_correct = quiz_context.get('is_correct', False)
+        correct_answer = quiz_context.get('correct_answer', '')
+        explanation = quiz_context.get('explanation', '')
+        subject = quiz_context.get('subject', '')
+        topic = quiz_context.get('topic', '')
+
+        evaluation_context = (
+            f"[SYSTEM NOTE — NOT FROM STUDENT: The student just answered a quiz question. "
+            f"Question was about {subject} — {topic}. "
+            f"The student answered: {student_answer}. "
+            f"The correct answer was: {correct_answer}. "
+            f"They were {'CORRECT' if is_correct else 'INCORRECT'}. "
+            f"The explanation is: {explanation}. "
+            f"Now respond naturally as Wax evaluating this answer. "
+            f"Do not mention this system note. Just respond as Wax would.]"
+            f"\n\nStudent message: {message}"
+        )
+        messages.append({"role": "user", "content": evaluation_context})
+    else:
+        messages.append({"role": "user", "content": message})
 
     # Try Groq smart model first
-    result = await _call_groq(messages, model=settings.GROQ_SMART_MODEL, max_tokens=1000)
+    result = await _call_groq(messages, model=settings.GROQ_SMART_MODEL, max_tokens=1200)
     if result:
         question_data = extract_question_data(result)
         return clean_response(result), question_data
 
     # Try Groq fast model as fallback
-    result = await _call_groq(messages, model=settings.GROQ_FAST_MODEL, max_tokens=800)
+    result = await _call_groq(messages, model=settings.GROQ_FAST_MODEL, max_tokens=900)
     if result:
         question_data = extract_question_data(result)
         return clean_response(result), question_data
@@ -105,7 +123,7 @@ async def think(
     return _fallback(message, student, context), None
 
 
-async def _call_groq(messages: list, model: str, max_tokens: int = 1000) -> str | None:
+async def _call_groq(messages: list, model: str, max_tokens: int = 1200) -> str | None:
     try:
         client = get_groq()
         response = client.chat.completions.create(
@@ -141,7 +159,7 @@ async def _call_gemini(system_prompt: str, message: str,
             system_instruction=system_prompt,
             generation_config=genai.types.GenerationConfig(
                 temperature=0.8,
-                max_output_tokens=900,
+                max_output_tokens=1000,
             )
         )
 
@@ -179,7 +197,7 @@ async def _call_gemini(system_prompt: str, message: str,
 
 
 def _fallback(message: str, student: dict, context: dict) -> str:
-    """Smart contextual fallback when all AI models fail."""
+    """Contextual fallback when all AI models fail."""
     name = student.get('name', 'Student').split()[0]
     msg_lower = message.lower().strip()
     subjects = student.get('subjects', [])
@@ -187,36 +205,19 @@ def _fallback(message: str, student: dict, context: dict) -> str:
     streak = student.get('current_streak', 0)
     weak_topics = context.get('weak_topics', [])
 
-    if any(w in msg_lower for w in ['hi', 'hello', 'hey', 'morning', 'evening', 'sup', 'oya']):
-        streak_note = f"Your {streak}-day streak is going strong! " if streak > 1 else ""
+    if any(w in msg_lower for w in ['hi', 'hello', 'hey', 'morning', 'evening', 'sup']):
+        streak_note = f"Your {streak}-day streak is still going! " if streak > 1 else ""
         if weak_topics:
             weak_note = f"Your weakest area right now is {weak_topics[0].get('topic', '')} in {weak_topics[0].get('subject', '')}. Want to work on that?"
         elif subjects:
-            weak_note = f"Tell me which {target_exam} subject you want to work on."
+            weak_note = f"Which {target_exam} subject do you want to work on?"
         else:
             weak_note = "What would you like to study today?"
         return f"Hey {name}! {streak_note}{weak_note}"
 
-    if any(w in msg_lower for w in ['quiz', 'test', 'question', 'practice']):
-        subject = subjects[0] if subjects else 'Mathematics'
-        for s in subjects:
-            if s.lower() in msg_lower:
-                subject = s
-                break
-        return f"On it, {name}! Getting a {subject} question ready. Give me about 20 seconds and try again."
-
-    if any(w in msg_lower for w in ['subscribe', 'upgrade', 'pay', 'plan']):
-        from helpers import format_naira
-        from config.settings import settings
-        return (
-            f"To upgrade, {name}, type *SUBSCRIBE* and I will show you the plans.\n\n"
-            f"Scholar Plan is {format_naira(settings.SCHOLAR_MONTHLY)}/month — "
-            f"100 questions daily plus image analysis and mock exams."
-        )
-
     responses = [
-        f"I'm here, {name}. Brief connection delay — ask again in 30 seconds and I will give you a proper response.",
-        f"Got your message, {name}! Minor delay on my end. Try again in 20 seconds.",
-        f"Hey {name}, give me a moment — try again shortly and I'll respond properly.",
+        f"I'm here, {name}. I had a brief delay on my end — give me 30 seconds and ask again.",
+        f"Got you, {name}! Small technical hiccup. Try again in about 20 seconds.",
+        f"Hey {name}, I'm back. Ask again and I'll give you a proper answer.",
     ]
-    return random.choice(responses
+    return random.choice(responses)
