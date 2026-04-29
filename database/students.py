@@ -1,25 +1,24 @@
 """
 Student Database Operations
-All imports are lazy to prevent startup errors.
+Updated to use conversation turns instead of question counts.
 """
 
 import asyncio
 
 
 async def get_student_by_phone(phone: str) -> dict | None:
-    """Gets student by phone — cache-first, then platform_sessions."""
     from database.client import supabase
-    from database.cache import get_student_id_by_phone, get_cached_student, cache_student, cache_student_by_phone
-    from helpers import hash_phone
+    from database.cache import (
+        get_student_id_by_phone, get_cached_student,
+        cache_student, cache_student_by_phone
+    )
 
-    # Check cache
     cached_id = get_student_id_by_phone(phone)
     if cached_id:
         cached = get_cached_student(cached_id)
         if cached:
             return cached
 
-    # Check platform_sessions
     try:
         result = supabase.table('platform_sessions')\
             .select('student_id')\
@@ -59,9 +58,8 @@ async def create_student(
     referred_by_wax_id: str = None,
     language_preference: str = 'english',
 ) -> dict:
-    """Creates a new student account. Called at end of onboarding."""
     from database.client import supabase
-    from database.cache import cache_student, cache_student_by_phone, invalidate_student_cache
+    from database.cache import cache_student, cache_student_by_phone
     from helpers import hash_phone, hash_pin, clean_name, generate_referral_code, nigeria_now
     from features.wax_id import create_new_wax_id, create_new_recovery_code
     from config.settings import settings
@@ -105,15 +103,16 @@ async def create_student(
         'total_points': 0,
         'current_level': 1,
         'level_name': 'Freshman',
+        # New field for turn-based usage tracking
+        'questions_today': 0,
+        'questions_today_reset_date': now.strftime('%Y-%m-%d'),
     }
 
     result = supabase.table('students').insert(student_data).execute()
     if not result.data:
-        raise Exception("Failed to create student — Supabase returned no data")
+        raise Exception("Failed to create student")
 
     new_student = result.data[0]
-
-    # Cache immediately
     cache_student(new_student)
     cache_student_by_phone(phone, new_student['id'])
 
@@ -121,7 +120,7 @@ async def create_student(
         try:
             await record_referral(referred_by_wax_id, new_student['id'], wax_id)
         except Exception as e:
-            print(f"Referral recording error (non-critical): {e}")
+            print(f"Referral recording error: {e}")
 
     return new_student
 
@@ -164,7 +163,6 @@ async def get_student_by_id(student_id: str) -> dict | None:
 
 
 async def get_student_subscription_status(student: dict) -> dict:
-    """Returns effective subscription status including trial, grace period."""
     from helpers import nigeria_now
     from config.settings import settings
     from datetime import timedelta, datetime
@@ -242,10 +240,12 @@ async def get_student_subscription_status(student: dict) -> dict:
 
 
 async def can_student_ask_question(student: dict) -> tuple:
-    """Returns (can_ask: bool, message: str)."""
+    """
+    Returns (can_ask: bool, message: str).
+    Now counts conversation turns instead of quiz questions.
+    """
     from database.client import supabase
     from config.settings import settings
-    from database.cache import get_bonus_questions
     from helpers import nigeria_today, nigeria_now, format_naira
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -256,8 +256,10 @@ async def can_student_ask_question(student: dict) -> tuple:
 
     try:
         fresh = supabase.table('students')\
-            .select('questions_today, questions_today_reset_date, subscription_tier, '
-                    'subscription_expires_at, is_trial_active, trial_expires_at, payg_questions_remaining')\
+            .select(
+                'questions_today, questions_today_reset_date, subscription_tier, '
+                'subscription_expires_at, is_trial_active, trial_expires_at'
+            )\
             .eq('id', student_id)\
             .execute()
 
@@ -267,15 +269,17 @@ async def can_student_ask_question(student: dict) -> tuple:
         f = fresh.data[0]
         today = nigeria_today()
 
+        # Reset daily counter if it is a new day
         if f.get('questions_today_reset_date') != today:
             supabase.table('students').update({
                 'questions_today': 0,
                 'questions_today_reset_date': today,
             }).eq('id', student_id).execute()
-            questions_today = 0
+            turns_today = 0
         else:
-            questions_today = f.get('questions_today', 0)
+            turns_today = f.get('questions_today', 0)
 
+        # Determine effective tier
         now = datetime.now(ZoneInfo("Africa/Lagos"))
         is_on_trial = False
 
@@ -291,33 +295,24 @@ async def can_student_ask_question(student: dict) -> tuple:
                 pass
 
         effective_tier = 'trial' if is_on_trial else f.get('subscription_tier', 'free')
-        limit = settings.get_daily_question_limit(effective_tier, is_on_trial)
+        limit = settings.get_daily_turn_limit(effective_tier, is_on_trial)
 
-        if questions_today >= limit:
-            payg_remaining = f.get('payg_questions_remaining', 0) or 0
-            bonus = get_bonus_questions(student_id)
-            if payg_remaining > 0 or bonus > 0:
-                return True, ""
-
+        if turns_today >= limit:
+            name = student.get('name', 'Student').split()[0]
             if effective_tier == 'free':
                 return False, (
-                    f"You have used all {limit} free questions for today.\n\n"
-                    f"Questions reset at midnight Nigerian time.\n\n"
-                    f"*Get more questions now:*\n\n"
-                    f"1. *Scholar Plan — {format_naira(settings.SCHOLAR_MONTHLY)}/month*\n"
-                    f"   100 questions daily + image analysis + mock exams\n"
-                    f"   Type *SUBSCRIBE* to upgrade\n\n"
-                    f"2. *Pay As You Go*\n"
-                    f"   {format_naira(settings.PAYG_100_QUESTIONS)} = 100 questions\n"
-                    f"   {format_naira(settings.PAYG_250_QUESTIONS)} = 250 questions\n"
-                    f"   {format_naira(settings.PAYG_500_QUESTIONS)} = 500 questions\n"
-                    f"   Type *PAYG* to buy question credits"
+                    f"You have been putting in real work today, {name}! "
+                    f"That is {limit} conversations with Wax.\n\n"
+                    f"I reset tomorrow morning at midnight.\n\n"
+                    f"*Want to keep going right now?*\n\n"
+                    f"*Scholar Plan — {format_naira(settings.SCHOLAR_MONTHLY)}/month*\n"
+                    f"Unlimited daily conversations, voice notes, and image analysis.\n\n"
+                    f"Type *SUBSCRIBE* to upgrade and never hit a limit again."
                 )
             else:
                 return False, (
-                    f"You have used all {limit} questions for today.\n\n"
-                    "Great work! Questions reset at midnight.\n\n"
-                    "Type *PAYG* to buy extra question credits if you want to keep going."
+                    f"Amazing session today, {name}!\n\n"
+                    "Resets at midnight. Rest up — your brain needs time to process everything you learned."
                 )
 
         return True, ""
@@ -332,7 +327,17 @@ async def increment_questions_today(student_id: str):
     try:
         supabase.rpc('increment_questions_today', {'student_id': student_id}).execute()
     except Exception as e:
-        print(f"increment_questions_today error: {e}")
+        # Fallback manual increment
+        try:
+            fresh = supabase.table('students').select('questions_today')\
+                .eq('id', student_id).execute()
+            if fresh.data:
+                current = fresh.data[0].get('questions_today', 0) or 0
+                supabase.table('students').update({
+                    'questions_today': current + 1
+                }).eq('id', student_id).execute()
+        except Exception as e2:
+            print(f"increment_questions_today fallback error: {e2}")
 
 
 async def get_student_profile_summary(student: dict) -> str:
@@ -354,7 +359,7 @@ async def get_student_profile_summary(student: dict) -> str:
     correct = student.get('total_questions_correct', 0)
     accuracy = round((correct / answered * 100) if answered > 0 else 0, 1)
 
-    today_answered = 0
+    today_turns = 0
     try:
         fresh = supabase.table('students')\
             .select('questions_today, questions_today_reset_date')\
@@ -362,24 +367,24 @@ async def get_student_profile_summary(student: dict) -> str:
         if fresh.data:
             f = fresh.data[0]
             if f.get('questions_today_reset_date') == nigeria_today():
-                today_answered = f.get('questions_today', 0)
+                today_turns = f.get('questions_today', 0)
     except Exception:
         pass
 
     bar_filled = min(int(accuracy / 10), 10)
-    bar = '\u2588' * bar_filled + '\u2591' * (10 - bar_filled)
+    bar = '█' * bar_filled + '░' * (10 - bar_filled)
 
     summary = (
         f"*{name.split()[0]}'s WaxPrep Profile*\n\n"
         f"WAX ID: {wax_id}\n"
         f"Plan: {tier}\n"
-        f"Level: {level} — {level_name}\n"
+        f"Level {level} — {level_name}\n"
         f"Points: {points:,}\n\n"
-        f"*Progress*\n"
+        f"*Learning Progress*\n"
         f"{bar} {accuracy}%\n"
-        f"Questions Answered: {answered:,}\n"
-        f"Correct: {correct:,} ({accuracy}%)\n"
-        f"Today: {today_answered} questions\n"
+        f"Total Interactions: {answered:,}\n"
+        f"Correct Answers: {correct:,} ({accuracy}%)\n"
+        f"Today: {today_turns} conversations\n"
         f"Current Streak: {streak} day{'s' if streak != 1 else ''}\n"
         f"Best Streak: {best_streak} day{'s' if best_streak != 1 else ''}\n\n"
     )
