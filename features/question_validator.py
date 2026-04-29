@@ -72,6 +72,8 @@ async def evaluate_question_quality(question_id: str) -> dict:
 
         # Suspiciously low correct rate — stored answer may be wrong
         min_rate = settings.QUESTION_SUSPICIOUS_CORRECT_RATE_MIN
+        max_rate = settings.QUESTION_SUSPICIOUS_CORRECT_RATE_MAX
+        
         if correct_rate < min_rate:
             supabase.table('questions').update({
                 'is_active': False,
@@ -88,7 +90,6 @@ async def evaluate_question_quality(question_id: str) -> dict:
             )
 
         # Suspiciously high correct rate — question may be too trivial
-        max_rate = settings.QUESTION_SUSPICIOUS_CORRECT_RATE_MAX
         elif correct_rate > max_rate:
             new_quality = max(q.get('quality_score', 5.0) - 1.5, 1.0)
             supabase.table('questions').update({
