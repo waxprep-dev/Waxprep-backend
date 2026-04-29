@@ -1,19 +1,14 @@
 """
-OpenAI Client — Vision AI for WaxPrep
+OpenAI Client — Vision AI and Voice for WaxPrep
 
-Used exclusively for image analysis.
-When a Scholar+ student sends a photo of:
-- A textbook page
-- A past question paper
-- A handwritten note
-- A diagram or graph
+Vision: Scholar+ students send photos of textbooks, past papers, diagrams.
+Wax reads the image and responds naturally.
 
-GPT-4o reads the image and either:
-1. Extracts the text/questions and helps with them
-2. Explains diagrams and graphs
-3. Solves problems visible in the image
+Voice In: Scholar+ students send voice notes.
+Groq Whisper transcribes them. Wax responds in text.
 
-This is one of the most powerful features of WaxPrep for serious students.
+Voice Out: Elite students receive voice replies from Wax (future feature).
+Uses OpenAI TTS or ElevenLabs.
 """
 
 from openai import AsyncOpenAI
@@ -23,6 +18,7 @@ import httpx
 
 openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
+
 async def analyze_image(
     image_url: str = None,
     image_base64: str = None,
@@ -30,33 +26,27 @@ async def analyze_image(
     student: dict = None
 ) -> str:
     """
-    Analyzes an image using GPT-4o.
-    
-    You can provide either:
-    - image_url: A direct URL to the image
-    - image_base64: Base64-encoded image data
-    
-    prompt: What to ask about the image.
-    If None, defaults to "Please analyze this educational content and help the student."
+    Analyzes an image using GPT-4o-mini.
+    Returns Wax's natural response about the image content.
     """
-    
     if not prompt:
         name = student.get('name', 'the student').split()[0] if student else 'the student'
         exam = student.get('target_exam', 'JAMB') if student else 'JAMB'
-        
+        subjects = ', '.join(student.get('subjects', [])) if student else 'general subjects'
+
         prompt = (
-            f"You are WaxPrep, an AI study companion for Nigerian secondary school students. "
-            f"The student's name is {name} and they're preparing for {exam}.\n\n"
-            f"Please look at this image and:\n"
-            f"1. If it contains a question or problem, solve it and explain your working\n"
-            f"2. If it's a diagram or graph, explain what it shows\n"
-            f"3. If it's text from a textbook, summarize the key points\n"
-            f"4. If it's a past question paper, identify the questions and help answer them\n\n"
-            f"Always use Nigerian context and examples where helpful.\n"
-            f"Format your response clearly for WhatsApp."
+            f"You are Wax, a brilliant personal AI teacher for Nigerian secondary school students. "
+            f"This student's name is {name}, preparing for {exam}, studying {subjects}.\n\n"
+            f"Look at this image and respond as a teacher would:\n"
+            f"- If it contains a question or problem: solve it and explain your working clearly\n"
+            f"- If it's a diagram or graph: explain what it shows and why it matters\n"
+            f"- If it's textbook content: identify the key concepts and explain them\n"
+            f"- If it's a past question paper: identify the questions and work through them\n\n"
+            f"Use Nigerian context and examples where helpful. "
+            f"Format your response clearly for WhatsApp. "
+            f"Be warm, be clear, be a teacher."
         )
-    
-    # Build the message with image
+
     if image_url:
         image_content = {
             "type": "image_url",
@@ -71,8 +61,8 @@ async def analyze_image(
             }
         }
     else:
-        return "I couldn't read that image. Please try sending it again."
-    
+        return "I could not read that image. Please try sending it again."
+
     try:
         response = await openai_client.chat.completions.create(
             model=settings.OPENAI_VISION_MODEL,
@@ -87,10 +77,9 @@ async def analyze_image(
             ],
             max_tokens=1500,
         )
-        
+
         result = response.choices[0].message.content
-        
-        # Track cost
+
         if hasattr(response, 'usage') and student:
             from ai.cost_tracker import track_ai_cost
             await track_ai_cost(
@@ -100,119 +89,134 @@ async def analyze_image(
                 tokens_output=response.usage.completion_tokens,
                 query_type='image_analysis'
             )
-        
+
         return result
-        
+
     except Exception as e:
         print(f"OpenAI vision error: {e}")
         return (
-            "I had trouble reading that image. 😕\n\n"
+            "I had trouble reading that image.\n\n"
             "Please try:\n"
             "• Taking a clearer photo in good lighting\n"
             "• Making sure the text is clearly visible\n"
             "• Sending just one page at a time\n\n"
-            "Or type your question in text and I'll help immediately!"
+            "Or type your question and I'll help immediately!"
         )
 
-async def download_whatsapp_image(image_id: str) -> str | None:
-    """
-    Downloads an image from WhatsApp's servers using the image ID.
-    Returns the image as base64-encoded string.
-    
-    WhatsApp images are not directly accessible by URL —
-    you must first get the media URL using the media ID,
-    then download from that URL using your token.
-    """
-    from config.settings import settings
-    
-    headers = {"Authorization": f"Bearer {settings.WHATSAPP_TOKEN}"}
-    
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        # Step 1: Get the media URL from the media ID
-        media_response = await client.get(
-            f"{settings.WHATSAPP_API_URL}/{image_id}",
-            headers=headers
-        )
-        
-        if media_response.status_code != 200:
-            print(f"Failed to get media URL: {media_response.text}")
-            return None
-        
-        media_data = media_response.json()
-        media_url = media_data.get('url')
-        
-        if not media_url:
-            return None
-        
-        # Step 2: Download the actual image
-        image_response = await client.get(media_url, headers=headers)
-        
-        if image_response.status_code != 200:
-            print(f"Failed to download image: {image_response.status_code}")
-            return None
-        
-        # Convert to base64
-        image_b64 = base64.b64encode(image_response.content).decode('utf-8')
-        return image_b64
 
 async def transcribe_voice_note(audio_id: str) -> str | None:
     """
-    Transcribes a voice note from WhatsApp using Groq's Whisper model.
-    
-    This is V2 territory but I'm adding the infrastructure now
-    so it's ready when you flip the switch.
-    
+    Downloads a voice note from WhatsApp and transcribes it using Groq Whisper.
     Returns the transcribed text, or None if transcription fails.
     """
-    from groq import AsyncGroq
-    
-    # First download the audio file from WhatsApp
+    # Download the audio
     audio_b64 = await download_whatsapp_media(audio_id, 'audio')
-    
+
     if not audio_b64:
         return None
-    
+
     try:
-        groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
-        
+        from groq import AsyncGroq
+
+        groq_async = AsyncGroq(api_key=settings.GROQ_API_KEY)
+
         # Decode base64 back to bytes
         audio_bytes = base64.b64decode(audio_b64)
-        
-        transcription = await groq_client.audio.transcriptions.create(
-            file=("audio.ogg", audio_bytes, "audio/ogg"),
-            model="whisper-large-v3",
+
+        transcription = await groq_async.audio.transcriptions.create(
+            file=("voice.ogg", audio_bytes, "audio/ogg"),
+            model=settings.GROQ_WHISPER_MODEL,
             language="en",
             response_format="text"
         )
-        
-        return transcription
-        
+
+        if isinstance(transcription, str):
+            return transcription.strip()
+
+        # Some versions return an object
+        if hasattr(transcription, 'text'):
+            return transcription.text.strip()
+
+        return str(transcription).strip()
+
     except Exception as e:
         print(f"Voice transcription error: {e}")
+
+        # Try OpenAI Whisper as fallback if Groq fails
+        if settings.OPENAI_API_KEY:
+            try:
+                audio_bytes = base64.b64decode(audio_b64)
+                response = await openai_client.audio.transcriptions.create(
+                    file=("voice.ogg", audio_bytes, "audio/ogg"),
+                    model="whisper-1",
+                    language="en"
+                )
+                return response.text.strip()
+            except Exception as e2:
+                print(f"OpenAI Whisper fallback error: {e2}")
+
         return None
 
+
+async def generate_voice_reply(text: str) -> bytes | None:
+    """
+    Converts text to speech using OpenAI TTS.
+    Returns audio bytes, or None if generation fails.
+    This is for the Elite tier voice reply feature (future).
+    """
+    if not settings.OPENAI_API_KEY:
+        return None
+
+    try:
+        response = await openai_client.audio.speech.create(
+            model=settings.OPENAI_TTS_MODEL,
+            voice=settings.OPENAI_TTS_VOICE,
+            input=text,
+            response_format="mp3"
+        )
+        return response.content
+    except Exception as e:
+        print(f"TTS generation error: {e}")
+        return None
+
+
+async def download_whatsapp_image(image_id: str) -> str | None:
+    """
+    Downloads an image from WhatsApp's servers.
+    Returns the image as base64-encoded string.
+    """
+    return await download_whatsapp_media(image_id, 'image')
+
+
 async def download_whatsapp_media(media_id: str, media_type: str = 'image') -> str | None:
-    """Generic function to download any media from WhatsApp."""
-    from config.settings import settings
-    
+    """Downloads any media from WhatsApp by media ID. Returns base64 string."""
     headers = {"Authorization": f"Bearer {settings.WHATSAPP_TOKEN}"}
-    
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             media_response = await client.get(
                 f"{settings.WHATSAPP_API_URL}/{media_id}",
                 headers=headers
             )
-            
+
+            if media_response.status_code != 200:
+                print(f"Failed to get media URL: {media_response.text[:200]}")
+                return None
+
             media_data = media_response.json()
             media_url = media_data.get('url')
-            
+
             if not media_url:
                 return None
-            
+
             file_response = await client.get(media_url, headers=headers)
+
+            if file_response.status_code != 200:
+                print(f"Failed to download media: {file_response.status_code}")
+                return None
+
             return base64.b64encode(file_response.content).decode('utf-8')
-            
+
         except Exception as e:
             print(f"Media download error: {e}")
             return None
