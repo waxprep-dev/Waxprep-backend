@@ -311,12 +311,18 @@ async def _evaluate_and_respond_telegram(chat_id: int, student: dict, conversati
 
     is_correct = student_letter == correct_answer
 
+    # Background mastery update (async, can be fire-and-forget)
     asyncio.ensure_future(record_interaction_outcome(student['id'], subject, topic, difficulty, is_correct))
+    
+    # Sync DB update for correct count – must be direct, not wrapped in asyncio.ensure_future
     if is_correct:
         from database.client import supabase
-        asyncio.ensure_future(supabase.table('students').update({
-            'total_questions_correct': student.get('total_questions_correct', 0) + 1
-        }).eq('id', student['id']).execute())
+        try:
+            supabase.table('students').update({
+                'total_questions_correct': student.get('total_questions_correct', 0) + 1
+            }).eq('id', student['id']).execute()
+        except Exception as e:
+            print(f"Correct count update error (Telegram): {e}")
 
     points, _ = await calculate_and_award_points(student_id=student['id'], is_correct=is_correct,
                                                   question_difficulty=difficulty)
