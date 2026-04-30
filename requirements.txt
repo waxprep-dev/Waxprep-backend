@@ -1,8 +1,8 @@
 fastapi==0.111.0
 uvicorn==0.30.0
-httpx
+httpx==0.25.2
 python-dotenv==1.0.0
-supabase
+supabase==2.4.5
 redis==5.0.4
 groq==0.9.0
 google-generativeai==0.8.3
