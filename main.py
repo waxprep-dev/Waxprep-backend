@@ -192,7 +192,20 @@ async def process_whatsapp_message_data(body_data: dict):
         import traceback
         traceback.print_exc()
 
+@app.post("/webhook/telegram")
+async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
+    try:
+        body_data = await request.json()
+        background_tasks.add_task(process_telegram_update_wrapper, body_data)
+        return JSONResponse(content={"status": "received"}, status_code=200)
+    except Exception as e:
+        print(f"Telegram webhook error: {e}")
+        return JSONResponse(content={"status": "error_logged"}, status_code=200)
 
+
+async def process_telegram_update_wrapper(body_data: dict):
+    from telegram.handler import process_telegram_update
+    await process_telegram_update(body_data)
 @app.post("/webhook/paystack")
 async def paystack_webhook(request: Request, background_tasks: BackgroundTasks):
     import hmac
