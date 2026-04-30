@@ -1,6 +1,6 @@
 """
 Student Database Operations
-Updated to use conversation turns instead of question counts.
+Updated: unlimited free tier, cost-based limits, tier-aware model routing.
 """
 
 import asyncio
@@ -103,14 +103,14 @@ async def create_student(
         'total_points': 0,
         'current_level': 1,
         'level_name': 'Freshman',
-        # New field for turn-based usage tracking
         'questions_today': 0,
         'questions_today_reset_date': now.strftime('%Y-%m-%d'),
+        'credits_balance': 0,
     }
 
     result = supabase.table('students').insert(student_data).execute()
     if not result.data:
-        raise Exception("Failed to create student")
+        raise Exception("Failed to create student — Supabase returned no data")
 
     new_student = result.data[0]
     cache_student(new_student)
@@ -189,7 +189,10 @@ async def get_student_subscription_status(student: dict) -> dict:
                     'display_tier': 'Full Trial Access'
                 }
             else:
-                await update_student(student['id'], {'is_trial_active': False})
+                # Trial expired — update silently
+                asyncio.ensure_future(
+                    update_student(student['id'], {'is_trial_active': False})
+                )
         except Exception as e:
             print(f"Trial check error: {e}")
 
@@ -242,9 +245,12 @@ async def get_student_subscription_status(student: dict) -> dict:
 async def can_student_ask_question(student: dict) -> tuple:
     """
     Returns (can_ask: bool, message: str).
-    Now counts conversation turns instead of quiz questions.
+
+    Free tier is now UNLIMITED in questions.
+    The limit is on per-student daily AI COST to prevent abuse.
+    Normal students will never hit this — it only catches bots or abusers.
     """
-    from database.client import supabase
+    from database.client import supabase, redis_client
     from config.settings import settings
     from helpers import nigeria_today, nigeria_now, format_naira
     from datetime import datetime
@@ -255,87 +261,89 @@ async def can_student_ask_question(student: dict) -> tuple:
         return False, "Account error. Please contact support."
 
     try:
-        fresh = supabase.table('students')\
-            .select(
-                'questions_today, questions_today_reset_date, subscription_tier, '
-                'subscription_expires_at, is_trial_active, trial_expires_at'
-            )\
-            .eq('id', student_id)\
-            .execute()
-
-        if not fresh.data:
-            return False, "Account not found."
-
-        f = fresh.data[0]
+        # Check per-student daily AI cost cap
         today = nigeria_today()
+        cost_key = f"student_ai_cost:{student_id}:{today}"
 
-        # Reset daily counter if it is a new day
-        if f.get('questions_today_reset_date') != today:
-            supabase.table('students').update({
-                'questions_today': 0,
-                'questions_today_reset_date': today,
-            }).eq('id', student_id).execute()
-            turns_today = 0
-        else:
-            turns_today = f.get('questions_today', 0)
+        try:
+            student_cost_raw = redis_client.get(cost_key)
+            student_cost = float(student_cost_raw) if student_cost_raw else 0.0
 
-        # Determine effective tier
-        now = datetime.now(ZoneInfo("Africa/Lagos"))
-        is_on_trial = False
+            # Determine tier to know which cap applies
+            fresh = supabase.table('students')\
+                .select('is_trial_active, trial_expires_at, subscription_tier')\
+                .eq('id', student_id)\
+                .execute()
 
-        trial_active = f.get('is_trial_active', False)
-        trial_expires_str = f.get('trial_expires_at')
+            if fresh.data:
+                f = fresh.data[0]
+                now_tz = datetime.now(ZoneInfo("Africa/Lagos"))
+                is_trial = False
+                if f.get('is_trial_active') and f.get('trial_expires_at'):
+                    try:
+                        trial_exp = datetime.fromisoformat(
+                            str(f['trial_expires_at']).replace('Z', '+00:00')
+                        )
+                        if trial_exp > now_tz:
+                            is_trial = True
+                    except Exception:
+                        pass
 
-        if trial_active and trial_expires_str:
-            try:
-                trial_exp = datetime.fromisoformat(str(trial_expires_str).replace('Z', '+00:00'))
-                if trial_exp > now:
-                    is_on_trial = True
-            except Exception:
-                pass
+                tier = f.get('subscription_tier', 'free')
+                effective = 'trial' if is_trial else tier
 
-        effective_tier = 'trial' if is_on_trial else f.get('subscription_tier', 'free')
-        limit = settings.get_daily_turn_limit(effective_tier, is_on_trial)
+                if effective == 'free':
+                    cap = settings.FREE_DAILY_AI_COST_CAP_USD
+                else:
+                    cap = settings.SCHOLAR_DAILY_AI_COST_CAP_USD
 
-        if turns_today >= limit:
-            name = student.get('name', 'Student').split()[0]
-            if effective_tier == 'free':
-                return False, (
-                    f"You have been putting in real work today, {name}! "
-                    f"That is {limit} conversations with Wax.\n\n"
-                    f"I reset tomorrow morning at midnight.\n\n"
-                    f"*Want to keep going right now?*\n\n"
-                    f"*Scholar Plan — {format_naira(settings.SCHOLAR_MONTHLY)}/month*\n"
-                    f"Unlimited daily conversations, voice notes, and image analysis.\n\n"
-                    f"Type *SUBSCRIBE* to upgrade and never hit a limit again."
-                )
-            else:
-                return False, (
-                    f"Amazing session today, {name}!\n\n"
-                    "Resets at midnight. Rest up — your brain needs time to process everything you learned."
-                )
+                if student_cost >= cap:
+                    name = student.get('name', 'Student').split()[0]
+                    if effective == 'free':
+                        return False, (
+                            f"You have been studying a lot today, {name}! "
+                            "I need to pace things a little. Try again in a few minutes.\n\n"
+                            f"Upgrade to Scholar for unlimited uninterrupted learning. "
+                            f"Type *SUBSCRIBE* — it is only {format_naira(settings.SCHOLAR_MONTHLY)}/month."
+                        )
+                    else:
+                        return False, (
+                            f"Incredible session today, {name}! "
+                            "I need a brief pause — try again in a few minutes."
+                        )
+        except Exception as cost_err:
+            # If cost tracking fails, allow the request
+            print(f"Cost cap check error (non-critical): {cost_err}")
 
         return True, ""
 
     except Exception as e:
         print(f"can_student_ask_question error: {e}")
-        return True, ""
+        return True, ""  # Default to allowing on error
 
 
 async def increment_questions_today(student_id: str):
     from database.client import supabase
     try:
         supabase.rpc('increment_questions_today', {'student_id': student_id}).execute()
-    except Exception as e:
-        # Fallback manual increment
+    except Exception:
         try:
-            fresh = supabase.table('students').select('questions_today')\
+            from helpers import nigeria_today
+            fresh = supabase.table('students').select('questions_today, questions_today_reset_date')\
                 .eq('id', student_id).execute()
             if fresh.data:
-                current = fresh.data[0].get('questions_today', 0) or 0
-                supabase.table('students').update({
-                    'questions_today': current + 1
-                }).eq('id', student_id).execute()
+                f = fresh.data[0]
+                today = nigeria_today()
+                if f.get('questions_today_reset_date') != today:
+                    supabase.table('students').update({
+                        'questions_today': 1,
+                        'questions_today_reset_date': today
+                    }).eq('id', student_id).execute()
+                else:
+                    current = f.get('questions_today', 0) or 0
+                    supabase.table('students').update({
+                        'questions_today': current + 1
+                    }).eq('id', student_id).execute()
         except Exception as e2:
             print(f"increment_questions_today fallback error: {e2}")
 
@@ -358,8 +366,9 @@ async def get_student_profile_summary(student: dict) -> str:
     answered = student.get('total_questions_answered', 0)
     correct = student.get('total_questions_correct', 0)
     accuracy = round((correct / answered * 100) if answered > 0 else 0, 1)
+    credits = student.get('credits_balance', 0) or 0
 
-    today_turns = 0
+    today_interactions = 0
     try:
         fresh = supabase.table('students')\
             .select('questions_today, questions_today_reset_date')\
@@ -367,7 +376,7 @@ async def get_student_profile_summary(student: dict) -> str:
         if fresh.data:
             f = fresh.data[0]
             if f.get('questions_today_reset_date') == nigeria_today():
-                today_turns = f.get('questions_today', 0)
+                today_interactions = f.get('questions_today', 0)
     except Exception:
         pass
 
@@ -380,14 +389,18 @@ async def get_student_profile_summary(student: dict) -> str:
         f"Plan: {tier}\n"
         f"Level {level} — {level_name}\n"
         f"Points: {points:,}\n\n"
-        f"*Learning Progress*\n"
+        f"*Progress*\n"
         f"{bar} {accuracy}%\n"
-        f"Total Interactions: {answered:,}\n"
-        f"Correct Answers: {correct:,} ({accuracy}%)\n"
-        f"Today: {today_turns} conversations\n"
+        f"Total: {answered:,} interactions | {correct:,} correct\n"
+        f"Today: {today_interactions}\n"
         f"Current Streak: {streak} day{'s' if streak != 1 else ''}\n"
-        f"Best Streak: {best_streak} day{'s' if best_streak != 1 else ''}\n\n"
+        f"Best Streak: {best_streak} day{'s' if best_streak != 1 else ''}\n"
     )
+
+    if credits > 0:
+        summary += f"Credits Balance: {credits}\n"
+
+    summary += "\n"
 
     if status['is_trial']:
         days_left = status.get('days_remaining', 0)
@@ -399,7 +412,7 @@ async def get_student_profile_summary(student: dict) -> str:
         days_left = status.get('days_remaining', 0)
         summary += (
             f"Grace period: {days_left} day{'s' if days_left != 1 else ''} left\n"
-            f"Type *SUBSCRIBE* to renew now.\n\n"
+            f"Type *SUBSCRIBE* to renew.\n\n"
         )
 
     summary += "_Your WAX ID is permanent. Never share your PIN._"
@@ -419,7 +432,7 @@ async def record_referral(referrer_wax_id: str, referred_student_id: str, referr
             'referrer_student_id': referrer_id,
             'referred_student_id': referred_student_id,
             'referrer_wax_id': referrer_wax_id,
-            'status': 'active'
+            'status': 'pending'
         }).execute()
     except Exception:
         pass
@@ -428,3 +441,59 @@ async def record_referral(referrer_wax_id: str, referred_student_id: str, referr
         supabase.rpc('increment_referral_count', {'student_id': referrer_id}).execute()
     except Exception as e:
         print(f"Referral count error: {e}")
+
+
+async def apply_referral_reward(referrer_wax_id: str):
+    """
+    Called when a referred student makes their first payment.
+    Gives the referrer 1 free month of Scholar.
+    """
+    from database.client import supabase
+    from helpers import nigeria_now
+    from datetime import timedelta, datetime
+
+    try:
+        referrer = supabase.table('students').select('id, name, subscription_tier, subscription_expires_at')\
+            .eq('wax_id', referrer_wax_id).execute()
+
+        if not referrer.data:
+            return
+
+        r = referrer.data[0]
+        now = nigeria_now()
+
+        # Extend subscription by 30 days
+        current_expires = r.get('subscription_expires_at')
+        if current_expires:
+            try:
+                exp = datetime.fromisoformat(str(current_expires).replace('Z', '+00:00'))
+                new_exp = max(exp, now) + timedelta(days=30)
+            except Exception:
+                new_exp = now + timedelta(days=30)
+        else:
+            new_exp = now + timedelta(days=30)
+
+        supabase.table('students').update({
+            'subscription_tier': 'scholar',
+            'subscription_expires_at': new_exp.isoformat(),
+            'is_trial_active': False,
+        }).eq('id', r['id']).execute()
+
+        # Notify the referrer
+        phone_result = supabase.table('platform_sessions').select('platform_user_id')\
+            .eq('student_id', r['id']).eq('platform', 'whatsapp').execute()
+
+        if phone_result.data:
+            from whatsapp.sender import send_whatsapp_message
+            phone = phone_result.data[0]['platform_user_id']
+            name = r['name'].split()[0]
+            await send_whatsapp_message(
+                phone,
+                f"Your referral reward just landed, {name}!\n\n"
+                f"Someone you referred just subscribed — so we have given you *1 free month of Scholar*.\n\n"
+                f"Your plan is now active until {new_exp.strftime('%d %B %Y')}.\n\n"
+                "Keep sharing WaxPrep with your classmates!"
+            )
+
+    except Exception as e:
+        print(f"Referral reward error: {e}")
