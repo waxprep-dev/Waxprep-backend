@@ -133,6 +133,7 @@ async def handle_promo_code_during_checkout(
     state: dict
 ):
     from database.subscriptions import validate_promo_code_for_payment
+    from database.subscriptions import apply_trial_extension
 
     tier = state.get('pending_tier', 'scholar')
     billing_period = state.get('pending_billing_period', 'monthly')
@@ -155,6 +156,32 @@ async def handle_promo_code_during_checkout(
             f"{error}\n\n"
             "Enter another code, or type *SKIP* to proceed without a discount."
         )
+        return
+
+    code_type = validation.get('code_type', '')
+    if code_type == 'full_trial':
+        # Trial extension code — no payment needed
+        success = await apply_trial_extension(student, validation)
+        if success:
+            await send_whatsapp_message(
+                phone,
+                f"Code *{code}* applied! Your trial has been extended by "
+                f"{validation.get('bonus_days', 3)} days. Enjoy full access.\n\n"
+                "What would you like to study?"
+            )
+        else:
+            await send_whatsapp_message(
+                phone,
+                "Could not apply trial extension right now. Try again or type *SKIP* to subscribe."
+            )
+        # Reset state
+        from database.conversations import update_conversation_state as ucs
+        current_state = state or {}
+        clean_state = {
+            k: v for k, v in current_state.items()
+            if k not in ['awaiting_response_for', 'pending_tier', 'pending_billing_period']
+        }
+        await ucs(conversation['id'], 'whatsapp', phone, {'conversation_state': clean_state})
         return
 
     discount_percent = validation.get('discount_percent', 0)
