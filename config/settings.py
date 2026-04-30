@@ -43,6 +43,7 @@ class Settings:
     WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
     WHATSAPP_API_VERSION = "v19.0"
     WHATSAPP_API_URL = "https://graph.facebook.com/v19.0"
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
     # Paystack
     PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_SECRET_KEY")
