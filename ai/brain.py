@@ -1,9 +1,10 @@
 """
 WaxPrep AI Brain
 
-The central intelligence. Everything goes through here.
-Wax is a teacher, not a question-answer machine.
-Context is king. Conversation is the medium. Teaching is the mission.
+The central intelligence.
+Key fix: quiz context is now passed clearly so the AI evaluates
+answers naturally without triggering "sorry something went wrong."
+Model selection is now tier-aware.
 """
 
 import re
@@ -50,24 +51,30 @@ async def think(
     """
     Main AI thinking function.
 
-    quiz_context: If provided, this means the student just answered a quiz question.
-    It contains: question, student_answer, is_correct, explanation.
-    Wax will evaluate the answer naturally as part of the response.
+    quiz_context: When provided, the student just answered a quiz.
+    Contains: question, student_answer, is_correct, correct_answer,
+    explanation, subject, topic.
 
-    Returns:
-        response_text: What to send the student
-        question_data: Structured question data if a quiz was generated, else None
+    Returns (response_text, question_data_or_None).
     """
     from ai.prompts import get_wax_system_prompt
     from ai.context_manager import format_context_for_prompt
 
     context = context or {}
     context_str = format_context_for_prompt(context)
-    system_prompt = get_wax_system_prompt(student, recent_subject, context_str)
+
+    # Get the right model for this student's tier
+    tier = student.get('subscription_tier', 'free')
+    is_trial = student.get('is_trial_active', False)
+    ai_model = settings.get_ai_model_for_tier(tier, is_trial)
+
+    system_prompt = get_wax_system_prompt(
+        student, recent_subject, context_str, ai_model
+    )
 
     messages = [{"role": "system", "content": system_prompt}]
 
-    # Add conversation history (last 20 messages for depth)
+    # Add conversation history (last 20 messages)
     for msg in conversation_history[-20:]:
         role = msg.get("role", "user")
         if role not in ["user", "assistant"]:
@@ -76,9 +83,10 @@ async def think(
         if content:
             messages.append({"role": role, "content": content})
 
-    # If this is a quiz answer evaluation, build context into the message
+    # Build the final user message
     if quiz_context:
-        question_text = quiz_context.get('question', '')
+        # Student just answered a quiz question
+        q_text = quiz_context.get('question', '')
         student_answer = quiz_context.get('student_answer', '')
         is_correct = quiz_context.get('is_correct', False)
         correct_answer = quiz_context.get('correct_answer', '')
@@ -86,29 +94,32 @@ async def think(
         subject = quiz_context.get('subject', '')
         topic = quiz_context.get('topic', '')
 
-        evaluation_context = (
-            f"[SYSTEM NOTE — NOT FROM STUDENT: The student just answered a quiz question. "
-            f"Question was about {subject} — {topic}. "
-            f"The student answered: {student_answer}. "
-            f"The correct answer was: {correct_answer}. "
-            f"They were {'CORRECT' if is_correct else 'INCORRECT'}. "
-            f"The explanation is: {explanation}. "
-            f"Now respond naturally as Wax evaluating this answer. "
-            f"Do not mention this system note. Just respond as Wax would.]"
-            f"\n\nStudent message: {message}"
+        system_inject = (
+            f"[CONTEXT FOR THIS RESPONSE — NOT FROM STUDENT]\n"
+            f"The student just answered a quiz question.\n"
+            f"Subject: {subject} | Topic: {topic}\n"
+            f"Question asked: {q_text}\n"
+            f"Student answered: {student_answer}\n"
+            f"This answer is: {'CORRECT' if is_correct else 'INCORRECT'}\n"
+            f"Correct answer is: {correct_answer}\n"
+            f"Explanation: {explanation}\n"
+            f"Now respond as Wax would — naturally evaluate the answer, explain if needed, keep going.\n"
+            f"[END CONTEXT]\n\n"
+            f"Student's message: {message}"
         )
-        messages.append({"role": "user", "content": evaluation_context})
+        messages.append({"role": "user", "content": system_inject})
     else:
         messages.append({"role": "user", "content": message})
 
-    # Try Groq smart model first
-    result = await _call_groq(messages, model=settings.GROQ_SMART_MODEL, max_tokens=1200)
+    # Try primary model (based on tier)
+    result = await _call_groq(messages, model=ai_model, max_tokens=1200)
     if result:
         question_data = extract_question_data(result)
         return clean_response(result), question_data
 
-    # Try Groq fast model as fallback
-    result = await _call_groq(messages, model=settings.GROQ_FAST_MODEL, max_tokens=900)
+    # If primary model fails, try fast model as fallback
+    fallback_model = settings.GROQ_FAST_MODEL if ai_model == settings.GROQ_SMART_MODEL else settings.GROQ_SMART_MODEL
+    result = await _call_groq(messages, model=fallback_model, max_tokens=900)
     if result:
         question_data = extract_question_data(result)
         return clean_response(result), question_data
@@ -119,7 +130,7 @@ async def think(
         question_data = extract_question_data(result)
         return clean_response(result), question_data
 
-    # Smart fallback when all AI fails
+    # Contextual fallback
     return _fallback(message, student, context), None
 
 
@@ -205,10 +216,13 @@ def _fallback(message: str, student: dict, context: dict) -> str:
     streak = student.get('current_streak', 0)
     weak_topics = context.get('weak_topics', [])
 
-    if any(w in msg_lower for w in ['hi', 'hello', 'hey', 'morning', 'evening', 'sup']):
+    if any(w in msg_lower for w in ['hi', 'hello', 'hey', 'morning', 'evening', 'sup', 'oya']):
         streak_note = f"Your {streak}-day streak is still going! " if streak > 1 else ""
         if weak_topics:
-            weak_note = f"Your weakest area right now is {weak_topics[0].get('topic', '')} in {weak_topics[0].get('subject', '')}. Want to work on that?"
+            weak_note = (
+                f"Your weakest area right now is {weak_topics[0].get('topic', '')} "
+                f"in {weak_topics[0].get('subject', '')}. Want to work on that?"
+            )
         elif subjects:
             weak_note = f"Which {target_exam} subject do you want to work on?"
         else:
@@ -216,8 +230,8 @@ def _fallback(message: str, student: dict, context: dict) -> str:
         return f"Hey {name}! {streak_note}{weak_note}"
 
     responses = [
-        f"I'm here, {name}. I had a brief delay on my end — give me 30 seconds and ask again.",
-        f"Got you, {name}! Small technical hiccup. Try again in about 20 seconds.",
-        f"Hey {name}, I'm back. Ask again and I'll give you a proper answer.",
+        f"I had a brief hiccup on my end, {name}. Ask me again and I'll give you a proper answer.",
+        f"Small technical delay, {name}. Try again in about 20 seconds.",
+        f"I'm back, {name}. Ask again and I'll respond properly.",
     ]
     return random.choice(responses)
