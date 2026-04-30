@@ -2,7 +2,7 @@
 Telegram Message Handler
 Uses the same AI brain, DB, and flows but sends replies via Telegram (not WhatsApp).
 """
-
+from ai.classifier import ONBOARDING_STATES
 import asyncio
 from config.settings import settings
 from helpers import sanitize_input
