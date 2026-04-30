@@ -22,9 +22,14 @@ class Settings:
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
-    GROQ_FAST_MODEL = "llama-3.1-8b-instant"
+    # Model names
+    # Free tier uses the fast 8B model — still very good, noticeably different from 70B
+    GROQ_FREE_MODEL = "llama-3.1-8b-instant"
+    # Scholar tier uses the 70B model — dramatically better for complex explanations
     GROQ_SMART_MODEL = "llama-3.3-70b-versatile"
+    GROQ_FAST_MODEL = "llama-3.1-8b-instant"
     GROQ_WHISPER_MODEL = "whisper-large-v3"
     GEMINI_MODEL = "gemini-1.5-flash-latest"
     GEMINI_PRO_MODEL = "gemini-1.5-pro-latest"
@@ -37,12 +42,15 @@ class Settings:
     WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "waxprep_verify_2024")
     WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
     WHATSAPP_API_VERSION = "v19.0"
-    WHATSAPP_API_URL = f"https://graph.facebook.com/v19.0"
+    WHATSAPP_API_URL = "https://graph.facebook.com/v19.0"
 
     # Paystack
     PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_SECRET_KEY")
     PAYSTACK_PUBLIC_KEY = os.getenv("PAYSTACK_PUBLIC_KEY")
     PAYSTACK_API_URL = "https://api.paystack.co"
+    # Plan codes from your Paystack dashboard
+    PAYSTACK_SCHOLAR_MONTHLY_PLAN_CODE = os.getenv("PAYSTACK_SCHOLAR_MONTHLY_PLAN_CODE", "")
+    PAYSTACK_SCHOLAR_YEARLY_PLAN_CODE = os.getenv("PAYSTACK_SCHOLAR_YEARLY_PLAN_CODE", "")
 
     # Termii
     TERMII_API_KEY = os.getenv("TERMII_API_KEY")
@@ -54,33 +62,96 @@ class Settings:
     ELITE_MONTHLY = 3500
     ELITE_YEARLY = 35000
 
-    # Pay-As-You-Go (kept for legacy, may phase out)
-    PAYG_100_QUESTIONS = 500
-    PAYG_250_QUESTIONS = 1000
-    PAYG_500_QUESTIONS = 1800
+    # Pay-As-You-Go Credit packs
+    # 1 credit = 1 naira equivalent
+    CREDIT_PACK_1000 = 1000    # 1000 credits for N1000
+    CREDIT_PACK_2500 = 2000    # 2500 credits for N2000
+    CREDIT_PACK_5000 = 3500    # 5000 credits for N3500
+    # Credit costs per action
+    CREDIT_COST_TEXT_QUESTION = 1
+    CREDIT_COST_IMAGE_ANALYSIS = 3
+    CREDIT_COST_VOICE_NOTE = 2
+    CREDIT_COST_MOCK_EXAM = 25
 
-    # Daily conversation turn limits
-    # A turn = one student message + one Wax response
-    # This replaces the old question counting model
-    FREE_DAILY_TURNS = 25
-    SCHOLAR_DAILY_TURNS = 99999
-    ELITE_DAILY_TURNS = 99999
-    TRIAL_DAILY_TURNS = 99999
+    # FREE TIER IS UNLIMITED TEXT — no question cap
+    # The difference is MODEL QUALITY and FEATURES, not quantity
+    # This is the core philosophy change
+    FREE_DAILY_TURNS = 999999   # Effectively unlimited
+    SCHOLAR_DAILY_TURNS = 999999
+    ELITE_DAILY_TURNS = 999999
+    TRIAL_DAILY_TURNS = 999999
 
-    DAILY_TURN_LIMITS = {
-        'free': 25,
-        'scholar': 99999,
-        'elite': 99999,
-        'trial': 99999,
+    # Per-student daily AI cost cap to prevent abuse
+    # Free students use cheap model so this is rarely hit
+    FREE_DAILY_AI_COST_CAP_USD = 0.05   # ~50 cents max per free student per day
+    SCHOLAR_DAILY_AI_COST_CAP_USD = 0.50
+
+    # Feature flags by tier
+    # These control what each tier can access
+    FEATURES_BY_TIER = {
+        'free': {
+            'text_questions': True,
+            'voice_input': False,
+            'image_analysis': False,
+            'mock_exams': False,
+            'spaced_repetition': True,
+            'study_plan': False,
+            'progress_report': False,
+            'battle_mode': False,
+            'premium_ai_model': False,
+            'priority_response': False,
+            'pdf_reports': False,
+            'daily_challenge': True,
+            'credits_purchase': True,
+        },
+        'trial': {
+            'text_questions': True,
+            'voice_input': True,
+            'image_analysis': True,
+            'mock_exams': True,
+            'spaced_repetition': True,
+            'study_plan': True,
+            'progress_report': True,
+            'battle_mode': True,
+            'premium_ai_model': True,
+            'priority_response': True,
+            'pdf_reports': True,
+            'daily_challenge': True,
+            'credits_purchase': True,
+        },
+        'scholar': {
+            'text_questions': True,
+            'voice_input': True,
+            'image_analysis': True,
+            'mock_exams': True,
+            'spaced_repetition': True,
+            'study_plan': True,
+            'progress_report': True,
+            'battle_mode': True,
+            'premium_ai_model': True,
+            'priority_response': True,
+            'pdf_reports': True,
+            'daily_challenge': True,
+            'credits_purchase': True,
+        },
+        'elite': {
+            'text_questions': True,
+            'voice_input': True,
+            'image_analysis': True,
+            'mock_exams': True,
+            'spaced_repetition': True,
+            'study_plan': True,
+            'progress_report': True,
+            'battle_mode': True,
+            'premium_ai_model': True,
+            'priority_response': True,
+            'pdf_reports': True,
+            'daily_challenge': True,
+            'credits_purchase': True,
+            'voice_output': True,
+            'audiobook': True,
+        }
     }
-
-    # Feature access by tier
-    # Which tiers can send voice notes and have them transcribed
-    VOICE_IN_TIERS = ['scholar', 'elite', 'trial']
-    # Which tiers can receive voice replies from Wax (future)
-    VOICE_OUT_TIERS = ['elite']
-    # Which tiers can send images for analysis
-    IMAGE_ANALYSIS_TIERS = ['scholar', 'elite', 'trial']
 
     # Trial Settings
     TRIAL_DURATION_DAYS = 7
@@ -96,9 +167,10 @@ class Settings:
     POINTS_DAILY_CHALLENGE_WIN = 100
     POINTS_BADGE_EARNED = 50
     POINTS_REFERRAL_SIGNUP = 100
+    POINTS_FIRST_PAYMENT = 200
 
-    # AI Budget
-    DAILY_AI_BUDGET_USD = 8.00
+    # AI Budget (platform-wide daily cap)
+    DAILY_AI_BUDGET_USD = 10.00
     AI_BUDGET_WARNING_THRESHOLD = 0.70
     AI_BUDGET_SHIFT_THRESHOLD = 0.85
 
@@ -131,25 +203,17 @@ class Settings:
     }
 
     @classmethod
-    def get_daily_turn_limit(cls, tier: str, is_trial: bool) -> int:
-        if is_trial:
-            return cls.TRIAL_DAILY_TURNS
-        return cls.DAILY_TURN_LIMITS.get(tier, cls.FREE_DAILY_TURNS)
+    def get_ai_model_for_tier(cls, tier: str, is_trial: bool) -> str:
+        effective = 'trial' if is_trial else tier
+        if effective in ('trial', 'scholar', 'elite'):
+            return cls.GROQ_SMART_MODEL
+        return cls.GROQ_FREE_MODEL
 
     @classmethod
-    def can_use_voice_in(cls, tier: str, is_trial: bool) -> bool:
+    def has_feature(cls, feature: str, tier: str, is_trial: bool) -> bool:
         effective = 'trial' if is_trial else tier
-        return effective in cls.VOICE_IN_TIERS
-
-    @classmethod
-    def can_use_image_analysis(cls, tier: str, is_trial: bool) -> bool:
-        effective = 'trial' if is_trial else tier
-        return effective in cls.IMAGE_ANALYSIS_TIERS
-
-    @classmethod
-    def can_use_voice_out(cls, tier: str, is_trial: bool) -> bool:
-        effective = 'trial' if is_trial else tier
-        return effective in cls.VOICE_OUT_TIERS
+        tier_features = cls.FEATURES_BY_TIER.get(effective, cls.FEATURES_BY_TIER['free'])
+        return tier_features.get(feature, False)
 
     @classmethod
     def get_level_name(cls, level: int) -> str:
