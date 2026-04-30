@@ -6,6 +6,37 @@ Updated: unlimited free tier, cost-based limits, tier-aware model routing.
 import asyncio
 
 
+async def get_student_by_platform_id(platform: str, platform_user_id: str) -> dict | None:
+    """
+    Lookup a student by platform (whatsapp, telegram) and its user ID.
+    Used for Telegram and any future platform.
+    """
+    from database.client import supabase
+    from database.cache import get_cached_student, cache_student
+
+    try:
+        result = supabase.table('platform_sessions')\
+            .select('student_id')\
+            .eq('platform', platform)\
+            .eq('platform_user_id', platform_user_id)\
+            .execute()
+
+        if not result.data:
+            return None
+
+        student_id = result.data[0]['student_id']
+        student_result = supabase.table('students').select('*').eq('id', student_id).execute()
+
+        if not student_result.data:
+            return None
+
+        student = student_result.data[0]
+        cache_student(student)
+        return student
+
+    except Exception as e:
+        print(f"get_student_by_platform_id error: {e}")
+        return None
 async def get_student_by_phone(phone: str) -> dict | None:
     from database.client import supabase
     from database.cache import (
