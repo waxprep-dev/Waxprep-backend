@@ -15,4 +15,4 @@ python-jose==3.3.0
 cryptography==42.0.8
 aiohttp==3.9.5
 Pillow==10.4.0
-python-telegram-bot==20.3
+python-telegram-bot==20.7
