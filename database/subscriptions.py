@@ -15,7 +15,7 @@ async def validate_promo_code_for_payment(
     """
     Validates a promo code and calculates the discounted price.
     Returns dict with: valid, discount_percent, final_amount, original_amount,
-                       promo_id, error_message.
+                       promo_id, error_message, code_type, bonus_days.
     """
     from database.client import supabase
     from helpers import nigeria_now
@@ -30,6 +30,7 @@ async def validate_promo_code_for_payment(
         'promo_id': None,
         'error_message': None,
         'code_type': None,
+        'bonus_days': 0,
     }
 
     if not code or not code.strip():
@@ -78,6 +79,7 @@ async def validate_promo_code_for_payment(
         # Calculate discount for subscription payments
         discount_percent = 0
         final_amount = original_amount
+        bonus_days = promo.get('bonus_days', 0) or 0
 
         if code_type == 'discount_percent':
             discount_percent = promo.get('discount_percent', 0) or 0
@@ -85,8 +87,7 @@ async def validate_promo_code_for_payment(
             final_amount = max(100, original_amount - discount_amount)
 
         elif code_type == 'full_trial':
-            # Trial codes don't discount subscription payments
-            # but can be noted as a bonus
+            # No discount on subscription, just trial extension
             discount_percent = 0
             final_amount = original_amount
 
@@ -106,6 +107,7 @@ async def validate_promo_code_for_payment(
             'promo_id': promo['id'],
             'promo_data': promo,
             'code_type': code_type,
+            'bonus_days': bonus_days,
             'error_message': None,
         }
 
@@ -130,6 +132,44 @@ async def mark_promo_used(promo_id: str, student_id: str, context: dict = None):
         }).eq('id', promo_id).execute()
     except Exception as e:
         print(f"Mark promo used error: {e}")
+
+
+async def apply_trial_extension(student: dict, validation: dict) -> bool:
+    """Extends the student's trial by the bonus days specified in the promo code."""
+    from database.client import supabase
+    from helpers import nigeria_now
+    from datetime import timedelta
+
+    bonus_days = validation.get('bonus_days', 3)
+    try:
+        # Get current trial expiry
+        result = supabase.table('students').select('trial_expires_at')\
+            .eq('id', student['id']).execute()
+        if not result.data:
+            return False
+
+        current_exp = result.data[0].get('trial_expires_at')
+        if current_exp:
+            from datetime import datetime
+            exp_dt = datetime.fromisoformat(current_exp.replace('Z', '+00:00'))
+            new_exp = max(exp_dt, nigeria_now()) + timedelta(days=bonus_days)
+        else:
+            new_exp = nigeria_now() + timedelta(days=bonus_days)
+
+        supabase.table('students').update({
+            'is_trial_active': True,
+            'trial_expires_at': new_exp.isoformat(),
+        }).eq('id', student['id']).execute()
+
+        # Mark promo used
+        promo_id = validation.get('promo_id')
+        if promo_id:
+            await mark_promo_used(promo_id, student['id'], {'action': 'trial_extension', 'days': bonus_days})
+
+        return True
+    except Exception as e:
+        print(f"Trial extension error: {e}")
+        return False
 
 
 async def generate_paystack_payment_link(
