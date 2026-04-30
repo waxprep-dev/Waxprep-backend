@@ -44,15 +44,33 @@ async def process_telegram_update(update: dict) -> None:
 
     # ----- Onboarding (no student yet) -----------------------------------
     if not student:
-        from telegram.onboarding import handle_new_or_existing as tg_onboarding
         from database.conversations import get_or_create_conversation
-
         conversation = await get_or_create_conversation(
             student_id='anonymous',
             platform='telegram',
             platform_user_id=str(chat_id)
         )
-        await tg_onboarding(chat_id, conversation, text)
+
+        # Extract stored state (if any) from the temp conversation
+        conv_state = conversation.get('conversation_state', {})
+        if isinstance(conv_state, str):
+            import json
+            try:
+                conv_state = json.loads(conv_state)
+            except Exception:
+                conv_state = {}
+
+        awaiting = conv_state.get('awaiting_response_for', '')
+
+        # If the user is already in an onboarding flow, continue it
+        from ai.classifier import ONBOARDING_STATES
+        if awaiting and awaiting in ONBOARDING_STATES:
+            from telegram.onboarding import handle_onboarding_response as tg_onboarding_response
+            await tg_onboarding_response(chat_id, conversation, text)
+        else:
+            # Otherwise, start fresh onboarding
+            from telegram.onboarding import handle_new_or_existing as tg_onboarding
+            await tg_onboarding(chat_id, conversation, text)
         return
 
     # ----- Student is banned --------------------------------------------
@@ -187,7 +205,6 @@ async def _handle_callback_query(callback_query: dict):
     if not chat_id or not data:
         return
 
-    # Answer the callback to close the loading state
     import httpx
     try:
         url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
@@ -196,7 +213,6 @@ async def _handle_callback_query(callback_query: dict):
     except Exception:
         pass
 
-    # Re-enter the handler with this data as a text message
     fake_update = {
         "message": {
             "chat": {"id": chat_id},
@@ -295,7 +311,6 @@ async def _evaluate_and_respond_telegram(chat_id: int, student: dict, conversati
 
     is_correct = student_letter == correct_answer
 
-    # Background updates
     asyncio.ensure_future(record_interaction_outcome(student['id'], subject, topic, difficulty, is_correct))
     if is_correct:
         from database.client import supabase
