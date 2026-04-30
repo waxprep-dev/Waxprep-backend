@@ -44,21 +44,16 @@ async def process_telegram_update(update: dict) -> None:
 
     # ----- Onboarding (no student yet) -----------------------------------
     if not student:
-        from whatsapp.flows.onboarding import handle_new_or_existing
-        from database.conversations import get_or_create_conversation
+    from telegram.onboarding import handle_new_or_existing as tg_onboarding
+    from database.conversations import get_or_create_conversation
 
-        conversation = await get_or_create_conversation(
-            student_id='anonymous',
-            platform='telegram',
-            platform_user_id=str(chat_id)
-        )
-        await handle_new_or_existing(
-            phone=f"telegram:{chat_id}",
-            conversation=conversation,
-            message=text
-        )
-        return
-
+    conversation = await get_or_create_conversation(
+        student_id='anonymous',
+        platform='telegram',
+        platform_user_id=str(chat_id)
+    )
+    await tg_onboarding(chat_id, conversation, text)
+    return
     # ----- Student is banned --------------------------------------------
     if student.get('is_banned'):
         await send_telegram_message(
