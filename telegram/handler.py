@@ -93,6 +93,11 @@ async def process_telegram_update(update: dict) -> None:
             conv_state = {}
 
     awaiting = conv_state.get('awaiting_response_for', '')
+    # If the student is in an onboarding flow, continue it via Telegram onboarding
+    if awaiting and awaiting in ONBOARDING_STATES:
+    from telegram.onboarding import handle_onboarding_response as tg_onboarding_response
+    await tg_onboarding_response(chat_id, conversation, text)
+    return
 
     trigger = classify_hard_trigger(text, conv_state)
 
