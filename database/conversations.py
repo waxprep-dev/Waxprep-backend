@@ -16,6 +16,25 @@ async def get_or_create_conversation(
     platform: str,
     platform_user_id: str
 ) -> dict:
+    async def get_or_create_conversation(
+    student_id: str,
+    platform: str,
+    platform_user_id: str
+) -> dict:
+    # Guard against "anonymous" as a student_id (happens before account creation).
+    # Return a temporary conversation object instead of hitting the database.
+    if not student_id or student_id == 'anonymous':
+        return {
+            'id': f'temp_{student_id}',
+            'student_id': student_id,
+            'platform': platform,
+            'platform_user_id': platform_user_id,
+            'current_mode': 'default',
+            'conversation_state': {},
+        }
+
+    from database.client import supabase
+    ...
     from database.client import supabase
 
     cached = get_cached_conversation(platform, platform_user_id)
