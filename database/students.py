@@ -37,10 +37,13 @@ async def get_student_by_platform_id(platform: str, platform_user_id: str) -> di
     except Exception as e:
         print(f"get_student_by_platform_id error: {e}")
         return None
+
+
 async def get_student_by_phone(phone: str) -> dict | None:
     if phone.startswith('telegram:'):
-    chat_id = phone.split(':', 1)[1]
-    return await get_student_by_platform_id('telegram', chat_id)
+        chat_id = phone.split(':', 1)[1]
+        return await get_student_by_platform_id('telegram', chat_id)
+
     from database.client import supabase
     from database.cache import (
         get_student_id_by_phone, get_cached_student,
