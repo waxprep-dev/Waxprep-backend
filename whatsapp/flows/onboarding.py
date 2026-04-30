@@ -108,19 +108,10 @@ async def _step_new_or_existing(phone: str, conversation: dict, message: str, st
     from config.settings import settings
 
     msg = message.strip().lower()
+    new_keywords = ['1', 'new', "i'm new", 'create', 'register', 'signup']
+    existing_keywords = ['2', 'existing', 'login', 'log in', 'have', 'wax']
 
-    # ---- FIXED: accept "i have a wax id" explicitly ----
-    is_new = any(k in msg for k in ['1', 'new', "i'm new", 'create', 'register', 'signup'])
-    # Accept "2", "existing", "login", "log in", or any message that contains the phrase "i have a wax id"
-    is_existing = (
-        '2' in msg or
-        'existing' in msg or
-        'login' in msg or
-        'log in' in msg or
-        'i have a wax id' in msg
-    )
-
-    if is_new:
+    if any(k in msg for k in new_keywords):
         await send_whatsapp_message(
             phone,
             "Before we set up your account, please accept our Terms of Service.\n\n"
@@ -140,7 +131,7 @@ async def _step_new_or_existing(phone: str, conversation: dict, message: str, st
             }
         })
 
-    elif is_existing:
+    elif any(k in msg for k in existing_keywords):
         await send_whatsapp_message(
             phone,
             "Welcome back!\n\n"
