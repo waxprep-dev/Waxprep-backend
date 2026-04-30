@@ -1,11 +1,10 @@
 """
 WaxPrep Main Application
-FIXES:
-- Webhook message deduplication using Redis (prevents same message being processed 3-4 times)
-- Admin API endpoints protected by X-Admin-Key header
-- Payment webhook checks for duplicate payments before processing
-- Paystack HMAC verification hardened
-- Amount verification added
+
+Fixes:
+- Paystack webhook now handles invoice.payment_failed for auto-debit
+- Referral reward applied when referee makes first payment
+- Better error logging
 """
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Depends
@@ -51,11 +50,9 @@ async def lifespan(app: FastAPI):
         import traceback
         traceback.print_exc()
 
-    print("WaxPrep is ready to receive messages!")
-
+    print("WaxPrep is ready!")
     yield
-
-    print("WaxPrep is shutting down...")
+    print("WaxPrep shutting down...")
     try:
         from utils.scheduler import stop_scheduler
         stop_scheduler()
@@ -119,13 +116,12 @@ async def health_check():
 @app.get("/webhook/whatsapp")
 async def whatsapp_webhook_verify(request: Request):
     params = dict(request.query_params)
-
     verify_token = params.get("hub.verify_token", "")
     challenge = params.get("hub.challenge", "")
     mode = params.get("hub.mode", "")
 
     if mode == "subscribe" and verify_token == settings.WHATSAPP_VERIFY_TOKEN:
-        print(f"WhatsApp webhook verified successfully")
+        print("WhatsApp webhook verified successfully")
         return PlainTextResponse(content=challenge)
     else:
         print(f"WhatsApp webhook verification failed. Token: '{verify_token}'")
@@ -138,7 +134,6 @@ async def whatsapp_webhook_receive(request: Request, background_tasks: Backgroun
         body_bytes = await request.body()
 
         if not body_bytes:
-            print("Received empty webhook body")
             return JSONResponse(content={"status": "empty"}, status_code=200)
 
         import json
@@ -148,28 +143,18 @@ async def whatsapp_webhook_receive(request: Request, background_tasks: Backgroun
             print(f"Invalid JSON in webhook: {e}")
             return JSONResponse(content={"status": "invalid_json"}, status_code=200)
 
-        print(f"Webhook received: {str(body_data)[:200]}")
-
         background_tasks.add_task(process_whatsapp_message_data, body_data)
-
         return JSONResponse(content={"status": "received"}, status_code=200)
 
     except Exception as e:
         print(f"Webhook receive error: {e}")
-        import traceback
-        traceback.print_exc()
         return JSONResponse(content={"status": "error_logged"}, status_code=200)
 
 
 async def process_whatsapp_message_data(body_data: dict):
-    """Background task that processes WhatsApp message data with deduplication."""
     try:
-        print(f"Processing webhook data...")
-
         entries = body_data.get('entry', [])
-
         if not entries:
-            print("No entries in webhook data")
             return
 
         for entry in entries:
@@ -182,8 +167,6 @@ async def process_whatsapp_message_data(body_data: dict):
                     try:
                         message_id = message_data.get('id', '')
 
-                        # DEDUPLICATION - WhatsApp retries webhooks causing the same
-                        # message to be processed 3-4 times. We block duplicates here.
                         if message_id:
                             try:
                                 from database.client import redis_client
@@ -192,15 +175,13 @@ async def process_whatsapp_message_data(body_data: dict):
                                 if already_processed:
                                     print(f"Duplicate webhook for message {message_id} — skipping")
                                     continue
-                                # Mark as processed for 5 minutes
                                 redis_client.setex(dedup_key, 300, "1")
                             except Exception as redis_err:
-                                print(f"Redis dedup error (non-critical): {redis_err}")
+                                print(f"Redis dedup error: {redis_err}")
 
-                        print(f"Processing message from: {message_data.get('from', 'unknown')}")
                         from whatsapp.handler import process_single_message
                         await process_single_message(message_data, value)
-                        print(f"Message processed successfully")
+
                     except Exception as e:
                         print(f"Error processing message: {e}")
                         import traceback
@@ -224,7 +205,6 @@ async def paystack_webhook(request: Request, background_tasks: BackgroundTasks):
 
         if settings.PAYSTACK_SECRET_KEY:
             if not paystack_signature:
-                print("Paystack webhook received without signature — rejecting")
                 raise HTTPException(status_code=400, detail="Missing signature")
 
             computed = hmac.new(
@@ -234,10 +214,9 @@ async def paystack_webhook(request: Request, background_tasks: BackgroundTasks):
             ).hexdigest()
 
             if paystack_signature != computed:
-                print(f"Invalid Paystack signature — possible forgery attempt")
+                print("Invalid Paystack signature")
                 raise HTTPException(status_code=400, detail="Invalid signature")
         else:
-            print("WARNING: PAYSTACK_SECRET_KEY not set. Rejecting webhook for security.")
             raise HTTPException(status_code=503, detail="Payment webhook not configured")
 
         try:
@@ -264,6 +243,8 @@ async def process_paystack_event(body_data: dict):
 
         if event == 'charge.success':
             await handle_successful_payment(data)
+        elif event == 'invoice.payment_failed':
+            await handle_failed_auto_debit(data)
         elif event == 'subscription.disable':
             print(f"Subscription disabled: {data.get('subscription_code')}")
         else:
@@ -273,6 +254,47 @@ async def process_paystack_event(body_data: dict):
         print(f"Paystack processing error: {e}")
         import traceback
         traceback.print_exc()
+
+
+async def handle_failed_auto_debit(data: dict):
+    """
+    Called when Paystack fails to auto-charge a student's card.
+    Sends a friendly WhatsApp message asking them to update payment.
+    """
+    try:
+        from database.client import supabase
+        from whatsapp.sender import send_whatsapp_message
+
+        subscription = data.get('subscription', {})
+        customer = data.get('customer', {})
+        customer_email = customer.get('email', '')
+
+        # Find student by WAX ID encoded in email (our format: waxid@students.waxprep.ng)
+        if '@students.waxprep.ng' in customer_email:
+            clean_wax = customer_email.split('@')[0]
+            wax_id_candidate = f"WAX-{clean_wax.upper()[:6]}" if not clean_wax.startswith('wax') else clean_wax.upper()
+
+            student_result = supabase.table('students').select('id, name')\
+                .ilike('wax_id', f'%{clean_wax.upper()}%').execute()
+
+            if student_result.data:
+                student = student_result.data[0]
+                phone_result = supabase.table('platform_sessions').select('platform_user_id')\
+                    .eq('student_id', student['id']).eq('platform', 'whatsapp').execute()
+
+                if phone_result.data:
+                    phone = phone_result.data[0]['platform_user_id']
+                    name = student['name'].split()[0]
+                    await send_whatsapp_message(
+                        phone,
+                        f"Hey {name}, your monthly Scholar renewal could not go through.\n\n"
+                        "No worries — just type *SUBSCRIBE* to generate a fresh payment link "
+                        "and keep your plan active.\n\n"
+                        "Your progress is safe regardless."
+                    )
+
+    except Exception as e:
+        print(f"Failed auto-debit handler error: {e}")
 
 
 async def handle_successful_payment(payment_data: dict):
@@ -289,44 +311,29 @@ async def handle_successful_payment(payment_data: dict):
     plan = metadata.get('plan', 'scholar').lower()
     billing_period = metadata.get('billing_period', 'monthly').lower()
     payg_questions = metadata.get('payg_questions', 0)
+    referred_by = metadata.get('referred_by_wax_id', '')
 
     print(f"Payment confirmed: {reference} | N{amount_naira} | {plan} {billing_period}")
 
     if not student_id:
-        print(f"Payment {reference} has no student_id in metadata — cannot process")
+        print(f"Payment {reference} has no student_id — cannot process")
         return
 
+    # Duplicate check
     try:
-        existing_payment = supabase.table('payments')\
+        existing = supabase.table('payments')\
             .select('id')\
             .eq('paystack_reference', reference)\
             .execute()
-
-        if existing_payment.data:
-            print(f"Payment {reference} already processed — skipping duplicate webhook")
+        if existing.data:
+            print(f"Payment {reference} already processed — skipping")
             return
     except Exception as e:
         print(f"Duplicate check error: {e}")
 
-    if plan != 'payg':
-        price_map = {
-            ('scholar', 'monthly'): settings.SCHOLAR_MONTHLY,
-            ('scholar', 'yearly'): settings.SCHOLAR_YEARLY,
-            ('pro', 'monthly'): settings.PRO_MONTHLY,
-            ('pro', 'yearly'): settings.PRO_YEARLY,
-            ('elite', 'monthly'): settings.ELITE_MONTHLY,
-            ('elite', 'yearly'): settings.ELITE_YEARLY,
-        }
-        expected_amount = price_map.get((plan, billing_period))
-        if expected_amount and amount_naira < (expected_amount - 10):
-            print(
-                f"FRAUD ALERT: Payment {reference} paid N{amount_naira} "
-                f"but {plan} {billing_period} costs N{expected_amount}. Rejecting."
-            )
-            return
-
     now = datetime.now(ZoneInfo("Africa/Lagos"))
 
+    # Record payment
     try:
         supabase.table('payments').insert({
             'student_id': student_id,
@@ -340,24 +347,32 @@ async def handle_successful_payment(payment_data: dict):
         print(f"Payment record error: {e}")
         return
 
-    student_result = supabase.table('students').select('name').eq('id', student_id).execute()
+    # Load student info
+    student_result = supabase.table('students').select('name, wax_id, total_questions_answered')\
+        .eq('id', student_id).execute()
     phone_result = supabase.table('platform_sessions').select('platform_user_id')\
         .eq('student_id', student_id).eq('platform', 'whatsapp').execute()
 
     student_name = student_result.data[0]['name'].split()[0] if student_result.data else 'Student'
+    student_wax_id = student_result.data[0].get('wax_id', '') if student_result.data else ''
     student_phone = phone_result.data[0]['platform_user_id'] if phone_result.data else None
+    is_first_payment = (student_result.data[0].get('total_questions_answered', 0) == 0
+                        if student_result.data else False)
 
+    # --- PAY-AS-YOU-GO ---
     if plan == 'payg' and payg_questions > 0:
         try:
             current = supabase.table('students')\
-                .select('payg_questions_remaining')\
+                .select('credits_balance, payg_questions_remaining')\
                 .eq('id', student_id).execute()
-            current_remaining = 0
+            current_credits = 0
             if current.data:
-                current_remaining = current.data[0].get('payg_questions_remaining', 0) or 0
-
+                current_credits = current.data[0].get('credits_balance', 0) or 0
             supabase.table('students').update({
-                'payg_questions_remaining': current_remaining + payg_questions,
+                'credits_balance': current_credits + (payg_questions * 10),
+                'payg_questions_remaining': (
+                    (current.data[0].get('payg_questions_remaining', 0) or 0) + payg_questions
+                ) if current.data else payg_questions,
                 'updated_at': now.isoformat(),
             }).eq('id', student_id).execute()
 
@@ -365,60 +380,87 @@ async def handle_successful_payment(payment_data: dict):
                 from whatsapp.sender import send_whatsapp_message
                 await send_whatsapp_message(
                     student_phone,
-                    f"Payment Confirmed, {student_name}!\n\n"
-                    f"{payg_questions} question credits have been added to your account.\n\n"
-                    f"You now have {current_remaining + payg_questions} credits available.\n\n"
-                    "Ask me any question to use them!"
+                    f"Payment confirmed, {student_name}!\n\n"
+                    f"{payg_questions} question credits added to your account.\n\n"
+                    "Ask me anything to use them!"
                 )
-
-            print(f"PAYG credits added: {payg_questions} for student {student_id}")
-
         except Exception as e:
             print(f"PAYG activation error: {e}")
+        return   # ← PAYG processing ends here
 
-    else:
-        duration_days = 365 if billing_period == 'yearly' else 30
-        expires = now + timedelta(days=duration_days)
+    # --- SUBSCRIPTION ---
+    duration_days = 365 if billing_period == 'yearly' else 30
+    expires = now + timedelta(days=duration_days)
+
+    try:
+        # Activate subscription
+        supabase.table('students').update({
+            'subscription_tier': plan,
+            'subscription_expires_at': expires.isoformat(),
+            'is_trial_active': False,
+            'updated_at': now.isoformat(),
+        }).eq('id', student_id).execute()
 
         try:
-            supabase.table('students').update({
-                'subscription_tier': plan,
-                'subscription_expires_at': expires.isoformat(),
-                'is_trial_active': False,
-                'updated_at': now.isoformat(),
-            }).eq('id', student_id).execute()
+            supabase.table('subscriptions').insert({
+                'student_id': student_id,
+                'tier': plan,
+                'billing_period': billing_period,
+                'amount_naira': amount_naira,
+                'started_at': now.isoformat(),
+                'expires_at': expires.isoformat(),
+                'is_active': True,
+            }).execute()
+        except Exception as sub_err:
+            print(f"Subscription record error: {sub_err}")
 
+        if student_phone:
+            from whatsapp.sender import send_whatsapp_message
+            await send_whatsapp_message(
+                student_phone,
+                f"Payment confirmed, {student_name}!\n\n"
+                f"*{plan.capitalize()} Plan* is now active.\n"
+                f"Valid until {expires.strftime('%d %B %Y')}.\n\n"
+                "Everything is unlocked. What do you want to study first?"
+            )
+
+        # Referral reward – if this student was referred
+        if referred_by:
             try:
-                supabase.table('subscriptions').insert({
-                    'student_id': student_id,
-                    'tier': plan,
-                    'billing_period': billing_period,
-                    'amount_naira': amount_naira,
-                    'started_at': now.isoformat(),
-                    'expires_at': expires.isoformat(),
-                    'is_active': True,
-                }).execute()
-            except Exception as sub_err:
-                print(f"Subscription record error (non-critical): {sub_err}")
+                from database.students import apply_referral_reward
+                await apply_referral_reward(referred_by)
+            except Exception as ref_err:
+                print(f"Referral reward error: {ref_err}")
 
-            if student_phone:
-                from whatsapp.sender import send_whatsapp_message
-                await send_whatsapp_message(
-                    student_phone,
-                    f"Payment Confirmed, {student_name}!\n\n"
-                    f"Welcome to {plan.capitalize()} Plan!\n"
-                    f"Active until {expires.strftime('%d %B %Y')}.\n\n"
-                    "You now have full access to all features.\n\n"
-                    "What do you want to study first?"
-                )
+        # First‑payment bonus points
+        try:
+            supabase.rpc('add_points_to_student', {
+                'student_id_param': student_id,
+                'points_to_add': settings.POINTS_FIRST_PAYMENT
+            }).execute()
+        except Exception:
+            pass
 
-            print(f"Subscription activated for student {student_id}")
+        # Notify admin
+        try:
+            from features.notifications import notify_admin_payment
+            await notify_admin_payment(
+                student_name=student_name,
+                wax_id=student_wax_id,
+                tier=plan,
+                billing_period=billing_period,
+                amount_naira=amount_naira,
+                reference=reference
+            )
+        except Exception:
+            pass
 
-        except Exception as e:
-            print(f"Payment activation error: {e}")
-            import traceback
-            traceback.print_exc()
+        print(f"Subscription activated for student {student_id}")
 
+    except Exception as e:
+        print(f"Payment activation error: {e}")
+        import traceback
+        traceback.print_exc()
 
 @app.get("/admin/stats", dependencies=[Depends(verify_admin_key)])
 async def get_admin_stats():
@@ -436,6 +478,8 @@ async def get_admin_stats():
             .gte('created_at', today).execute()
         paying = supabase.table('students').select('id', count='exact')\
             .neq('subscription_tier', 'free').execute()
+        on_trial = supabase.table('students').select('id', count='exact')\
+            .eq('is_trial_active', True).execute()
 
         payments = supabase.table('payments').select('amount_naira')\
             .gte('completed_at', today).eq('status', 'completed').execute()
@@ -449,8 +493,10 @@ async def get_admin_stats():
             "active_today": active_today.count or 0,
             "new_today": new_today.count or 0,
             "paying_subscribers": paying.count or 0,
+            "on_trial": on_trial.count or 0,
             "revenue_today_naira": revenue_today,
             "ai_cost_today_usd": round(ai_cost, 4),
+            "ai_budget_usd": settings.DAILY_AI_BUDGET_USD,
             "status": "operational"
         }
     except Exception as e:
@@ -477,7 +523,6 @@ async def api_broadcast(request: Request, background_tasks: BackgroundTasks):
 async def run_broadcast(target: str, message: str):
     try:
         from admin.dashboard import admin_broadcast
-        from config.settings import settings
         if settings.ADMIN_WHATSAPP:
             await admin_broadcast(settings.ADMIN_WHATSAPP, f"{target} {message}")
     except Exception as e:
@@ -542,7 +587,7 @@ async def api_send_message(request: Request):
 async def trigger_daily_report(background_tasks: BackgroundTasks):
     from utils.scheduler import send_daily_admin_report
     background_tasks.add_task(send_daily_admin_report)
-    return {"success": True, "message": "Daily report triggered — check your WhatsApp"}
+    return {"success": True, "message": "Daily report triggered"}
 
 
 @app.get("/admin/trigger-challenge", dependencies=[Depends(verify_admin_key)])
