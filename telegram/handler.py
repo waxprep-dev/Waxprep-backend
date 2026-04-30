@@ -2,7 +2,7 @@
 Telegram Message Handler
 Uses the same AI brain, DB, and flows but sends replies via Telegram (not WhatsApp).
 """
-from ai.classifier import ONBOARDING_STATES
+
 import asyncio
 from config.settings import settings
 from helpers import sanitize_input
@@ -76,7 +76,7 @@ async def process_telegram_update(update: dict) -> None:
         return
 
     # ----- Hard trigger check (like SUBSCRIBE, MYID, etc.) -------------
-    from ai.classifier import classify_hard_trigger
+    from ai.classifier import classify_hard_trigger, ONBOARDING_STATES
     from database.conversations import get_or_create_conversation
 
     conversation = await get_or_create_conversation(
@@ -93,11 +93,12 @@ async def process_telegram_update(update: dict) -> None:
             conv_state = {}
 
     awaiting = conv_state.get('awaiting_response_for', '')
-    # If the student is in an onboarding flow, continue it via Telegram onboarding
+
+    # ----- Continue onboarding if the student is still in the flow ------
     if awaiting and awaiting in ONBOARDING_STATES:
-    from telegram.onboarding import handle_onboarding_response as tg_onboarding_response
-    await tg_onboarding_response(chat_id, conversation, text)
-    return
+        from telegram.onboarding import handle_onboarding_response as tg_onboarding_response
+        await tg_onboarding_response(chat_id, conversation, text)
+        return
 
     trigger = classify_hard_trigger(text, conv_state)
 
