@@ -214,7 +214,7 @@ async def _step_subjects(chat_id, conversation, message, state):
 
 
 async def _step_exam_date(chat_id, conversation, message, state):
-    from datetime import datetime, timedelta
+    from datetime import datetime
     from helpers import nigeria_now
     msg = message.strip().lower()
     exam_date = None; days_left = 180
@@ -222,7 +222,15 @@ async def _step_exam_date(chat_id, conversation, message, state):
     year_match = re.search(r'20(2[4-9]|[3-9]\d)', msg)
     year = int(year_match.group(0)) if year_match else None
     month = next((m_num for m_name, m_num in months.items() if m_name in msg), None)
-    if month and year: exam_date = f"{year}-{month:02d}-15"; exam_dt = datetime(year, month, 15); days_left = max(1, (exam_dt - datetime.now()).days)
+    
+    if month and year:
+        exam_dt = datetime(year, month, 15)
+        now_dt = datetime.now()
+        if exam_dt < now_dt:
+            await send_telegram_message(chat_id, "That date is already in the past! Please enter a future exam date.\n\nTry: May 2026, June 2026, or type *Not sure*")
+            return
+        exam_date = f"{year}-{month:02d}-15"
+        days_left = max(1, (exam_dt - now_dt).days)
     elif msg in ['not sure', 'soon', 'this year', 'idk', "don't know", 'unsure', 'no', 'skip']:
         class_level = state.get('class_level', 'SS3')
         if 'SS1' in class_level: years_ahead = 2
@@ -230,6 +238,7 @@ async def _step_exam_date(chat_id, conversation, message, state):
         else: years_ahead = 0
         future_year = nigeria_now().year + years_ahead
         exam_date = f"{future_year}-06-15"; days_left = max(1, (datetime(future_year, 6, 15) - datetime.now()).days)
+    
     if not exam_date: await send_telegram_message(chat_id, "When is your exam?\n\nTry:\n- May 2026\n- June 2026\n- Not sure"); return
     urgency = f"\n\nOnly {days_left} days left! We need to move fast." if days_left < 30 else f"\n\n{days_left} days. Enough time if we stay focused." if days_left < 90 else f"\n\n{days_left} days — plenty of time if we start now and stay consistent."
     await send_telegram_message(chat_id, f"Got it!{urgency}\n\nWhich state are you in?\n\n_(e.g. Lagos, Abuja, Kano, Rivers)_")
