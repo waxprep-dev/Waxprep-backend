@@ -282,6 +282,15 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
 
     asyncio.ensure_future(save_message(conversation['id'], student['id'], 'telegram', 'user', message))
 
+    # Silent diagnosis: detect hesitation and log signal
+    from features.silent_diagnosis import detect_hesitation, log_signal
+    if detect_hesitation(message):
+        current_subject = conversation.get('current_subject', 'general')
+        current_topic = conversation.get('current_topic', 'general')
+        asyncio.ensure_future(log_signal(
+            student['id'], current_subject, current_topic, 'hesitation', 'rephrase_request'
+        ))
+
     try:
         response_text, question_data = await think(
             message=message, student=student, conversation_history=history,
