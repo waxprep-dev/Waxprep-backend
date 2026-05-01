@@ -265,7 +265,14 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
         response_text = f"Something went wrong on my end, {student.get('name', 'Student').split()[0]}. Please try again."
         question_data = None
 
-    await send_telegram_message(chat_id, response_text)
+    # If the AI generated a quiz question, attach tappable answer buttons
+    keyboard = None
+    if question_data:
+        from telegram.sender import build_quiz_keyboard
+        keyboard = build_quiz_keyboard(question_data)
+
+    await send_telegram_message(chat_id, response_text, reply_markup=keyboard)
+    
     asyncio.ensure_future(save_message(conversation['id'], student['id'], 'telegram', 'assistant', response_text))
     asyncio.ensure_future(increment_questions_today(student['id']))
 
@@ -359,7 +366,14 @@ async def _evaluate_and_respond_telegram(chat_id: int, student: dict, conversati
         recent_subject=conversation.get('current_subject'), context=context, quiz_context=quiz_ctx
     )
 
-    await send_telegram_message(chat_id, response_text)
+    # Attach keyboard for the NEXT question if the AI generated one
+    keyboard = None
+    if new_question_data:
+        from telegram.sender import build_quiz_keyboard
+        keyboard = build_quiz_keyboard(new_question_data)
+
+    await send_telegram_message(chat_id, response_text, reply_markup=keyboard)
+    
     asyncio.ensure_future(save_message(conversation['id'], student['id'], 'telegram', 'user', message))
     asyncio.ensure_future(save_message(conversation['id'], student['id'], 'telegram', 'assistant', response_text))
 
