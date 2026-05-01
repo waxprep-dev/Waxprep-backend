@@ -71,23 +71,55 @@ async def get_or_create_conversation(
             conversation = result.data[0]
         else:
             now = nigeria_now()
-            insert_result = supabase.table('conversations').insert({
-                'student_id': student_id,
-                'platform': platform,
-                'platform_user_id': platform_user_id,
-                'current_mode': 'default',
-                'conversation_state': {},
-                'session_started_at': now.isoformat(),
-                'last_message_at': now.isoformat(),
-            }).execute()
-            conversation = insert_result.data[0] if insert_result.data else {
-                'id': f'temp_{student_id}',
-                'student_id': student_id,
-                'platform': platform,
-                'platform_user_id': platform_user_id,
-                'current_mode': 'default',
-                'conversation_state': {},
-            }
+            try:
+                insert_result = supabase.table('conversations').insert({
+                    'student_id': student_id,
+                    'platform': platform,
+                    'platform_user_id': platform_user_id,
+                    'current_mode': 'default',
+                    'conversation_state': {},
+                    'session_started_at': now.isoformat(),
+                    'last_message_at': now.isoformat(),
+                }).execute()
+                conversation = insert_result.data[0] if insert_result.data else None
+                
+                if not conversation:
+                     raise Exception("Insert returned no data")
+
+            except Exception as insert_err:
+                # If duplicate key error (race condition or cache miss), fetch the existing record
+                if '23505' in str(insert_err) or 'duplicate' in str(insert_err).lower():
+                    try:
+                        existing = supabase.table('conversations')\
+                            .select('*')\
+                            .eq('student_id', student_id)\
+                            .eq('platform', platform)\
+                            .eq('platform_user_id', platform_user_id)\
+                            .execute()
+                        if existing.data:
+                            conversation = existing.data[0]
+                        else:
+                            # Fallback if selection fails
+                            conversation = {
+                                'id': f'temp_{student_id}',
+                                'student_id': student_id,
+                                'platform': platform,
+                                'platform_user_id': platform_user_id,
+                                'current_mode': 'default',
+                                'conversation_state': {},
+                            }
+                    except Exception:
+                        conversation = {
+                            'id': f'temp_{student_id}',
+                            'student_id': student_id,
+                            'platform': platform,
+                            'platform_user_id': platform_user_id,
+                            'current_mode': 'default',
+                            'conversation_state': {},
+                        }
+                else:
+                    # Re-raise if it's a different type of database error
+                    raise insert_err
 
         cache_conversation(platform, platform_user_id, conversation)
         return conversation
@@ -233,7 +265,6 @@ async def get_conversation_history(conversation_id: str, limit: int = 20) -> lis
         return []
 
 
-# Additional helper: when a student is created, we can migrate temp session to a real one.
 async def migrate_temp_to_real(
     platform: str,
     platform_user_id: str,
