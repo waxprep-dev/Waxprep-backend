@@ -467,117 +467,124 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
     """
     The main AI interaction. Everything that is not a hard command ends up here.
     """
+    # ---- Race condition guard ----
+    from database.conversations import acquire_student_lock, release_student_lock
     from whatsapp.sender import send_whatsapp_message
-    from database.conversations import (
-        get_conversation_history, update_conversation_state, save_message
-    )
-    from database.students import can_student_ask_question, increment_questions_today
-    from ai.brain import think
-    from ai.context_manager import get_full_student_context
-    from features.quiz_engine import extract_subject_from_message
-    from helpers import nigeria_today
-
-    # Check usage limit
-    can_ask, limit_msg = await can_student_ask_question(student)
-    if not can_ask:
-        await send_whatsapp_message(phone, limit_msg)
+    
+    locked = await acquire_student_lock(student['id'])
+    if not locked:
+        await send_whatsapp_message(phone, "I'm still processing your last message. One moment.")
         return
+        
+    try:
+        from database.conversations import (
+            get_conversation_history, update_conversation_state, save_message
+        )
+        from database.students import can_student_ask_question, increment_questions_today
+        from ai.brain import think
+        from ai.context_manager import get_full_student_context
+        from features.quiz_engine import extract_subject_from_message
+        from helpers import nigeria_today
 
-    today = nigeria_today()
-    if conv_state.get('session_date', '') != today:
-        conv_state['session_questions'] = 0
-        conv_state['session_correct'] = 0
-        conv_state['session_date'] = today
+        # Check usage limit
+        can_ask, limit_msg = await can_student_ask_question(student)
+        if not can_ask:
+            await send_whatsapp_message(phone, limit_msg)
+            return
 
-    # Load history and context in parallel
-    history_task = asyncio.ensure_future(get_conversation_history(conversation['id']))
-    context_task = asyncio.ensure_future(get_full_student_context(student))
-    history, context = await asyncio.gather(history_task, context_task)
+        today = nigeria_today()
+        if conv_state.get('session_date', '') != today:
+            conv_state['session_questions'] = 0
+            conv_state['session_correct'] = 0
+            conv_state['session_date'] = today
 
-    recent_subject = conversation.get('current_subject')
+        # Load history and context in parallel
+        history_task = asyncio.ensure_future(get_conversation_history(conversation['id']))
+        context_task = asyncio.ensure_future(get_full_student_context(student))
+        history, context = await asyncio.gather(history_task, context_task)
 
-    asyncio.ensure_future(save_message(
-        conversation['id'], student['id'], 'whatsapp', 'user', message
-    ))
+        recent_subject = conversation.get('current_subject')
 
-    # Silent diagnosis: detect hesitation and log signal
-    from features.silent_diagnosis import detect_hesitation, log_signal, count_recent_hesitations
-    if detect_hesitation(message):
-        current_subject = conversation.get('current_subject', 'general')
-        current_topic = conversation.get('current_topic', 'general')
-        asyncio.ensure_future(log_signal(
-            student['id'], current_subject, current_topic, 'hesitation', 'rephrase_request'
+        asyncio.ensure_future(save_message(
+            conversation['id'], student['id'], 'whatsapp', 'user', message
         ))
 
-        # If this is the second or third time they're stuck on the same topic,
-        # inject a "slow down" note into the message for the AI
-        recent_count = await count_recent_hesitations(student['id'], current_subject, current_topic)
-        if recent_count >= 2:
-            message = (
-                f"[STUDENT IS REPEATEDLY CONFUSED ABOUT THIS TOPIC — USE SIMPLER LANGUAGE, "
-                f"SHORTER SENTENCES, A CONCRETE NIGERIAN EXAMPLE, AND CHECK FOR UNDERSTANDING "
-                f"AFTER EACH POINT. DO NOT INTRODUCE NEW CONCEPTS.]\n\n{message}"
+        # Silent diagnosis: detect hesitation and log signal
+        from features.silent_diagnosis import detect_hesitation, log_signal, count_recent_hesitations
+        if detect_hesitation(message):
+            current_subject = conversation.get('current_subject', 'general')
+            current_topic = conversation.get('current_topic', 'general')
+            asyncio.ensure_future(log_signal(
+                student['id'], current_subject, current_topic, 'hesitation', 'rephrase_request'
+            ))
+
+            recent_count = await count_recent_hesitations(student['id'], current_subject, current_topic)
+            if recent_count >= 2:
+                message = (
+                    f"[STUDENT IS REPEATEDLY CONFUSED ABOUT THIS TOPIC — USE SIMPLER LANGUAGE, "
+                    f"SHORTER SENTENCES, A CONCRETE NIGERIAN EXAMPLE, AND CHECK FOR UNDERSTANDING "
+                    f"AFTER EACH POINT. DO NOT INTRODUCE NEW CONCEPTS.]\n\n{message}"
+                )
+
+        # Call AI brain
+        try:
+            response_text, question_data = await think(
+                message=message,
+                student=student,
+                conversation_history=history,
+                recent_subject=recent_subject,
+                context=context,
             )
+        except Exception as e:
+            print(f"AI brain error in _think_and_respond: {e}")
+            import traceback
+            traceback.print_exc()
+            name = student.get('name', 'Student').split()[0]
+            response_text = f"I had a brief technical issue, {name}. Send your message again and I will answer properly."
+            question_data = None
 
-    # Call AI brain
-    try:
-        response_text, question_data = await think(
-            message=message,
-            student=student,
-            conversation_history=history,
-            recent_subject=recent_subject,
-            context=context,
-        )
-    except Exception as e:
-        print(f"AI brain error in _think_and_respond: {e}")
-        import traceback
-        traceback.print_exc()
-        name = student.get('name', 'Student').split()[0]
-        response_text = f"I had a brief technical issue, {name}. Send your message again and I will answer properly."
-        question_data = None
+        await send_whatsapp_message(phone, response_text)
 
-    await send_whatsapp_message(phone, response_text)
+        asyncio.ensure_future(save_message(
+            conversation['id'], student['id'], 'whatsapp', 'assistant', response_text
+        ))
 
-    asyncio.ensure_future(save_message(
-        conversation['id'], student['id'], 'whatsapp', 'assistant', response_text
-    ))
+        asyncio.ensure_future(increment_questions_today(student['id']))
+        asyncio.ensure_future(_update_stats(student, phone, conv_state))
 
-    asyncio.ensure_future(increment_questions_today(student['id']))
-    asyncio.ensure_future(_update_stats(student, phone, conv_state))
-
-    if question_data:
-        # AI generated a quiz question — save it to state
-        new_state = {
-            **conv_state,
-            'current_question': question_data,
-            'session_date': today,
-        }
-        subject = question_data.get('subject', recent_subject or '')
-        topic = question_data.get('topic', '')
-
-        await update_conversation_state(
-            conversation['id'], 'whatsapp', phone,
-            {
-                'conversation_state': new_state,
-                'current_subject': subject,
-                'current_topic': topic,
+        if question_data:
+            new_state = {
+                **conv_state,
+                'current_question': question_data,
+                'session_date': today,
             }
-        )
-    else:
-        # Clear pending question if student moved on naturally
-        if conv_state.get('current_question'):
-            new_state = {**conv_state, 'current_question': None}
-            asyncio.ensure_future(update_conversation_state(
-                conversation['id'], 'whatsapp', phone,
-                {'conversation_state': new_state}
-            ))
+            subject = question_data.get('subject', recent_subject or '')
+            topic = question_data.get('topic', '')
 
-        detected_subject = extract_subject_from_message(message)
-        if detected_subject:
-            asyncio.ensure_future(update_conversation_state(
+            await update_conversation_state(
                 conversation['id'], 'whatsapp', phone,
-                {'current_subject': detected_subject}
-            ))
+                {
+                    'conversation_state': new_state,
+                    'current_subject': subject,
+                    'current_topic': topic,
+                }
+            )
+        else:
+            if conv_state.get('current_question'):
+                new_state = {**conv_state, 'current_question': None}
+                asyncio.ensure_future(update_conversation_state(
+                    conversation['id'], 'whatsapp', phone,
+                    {'conversation_state': new_state}
+                ))
+
+            detected_subject = extract_subject_from_message(message)
+            if detected_subject:
+                asyncio.ensure_future(update_conversation_state(
+                    conversation['id'], 'whatsapp', phone,
+                    {'current_subject': detected_subject}
+                ))
+    finally:
+        release_student_lock(student['id'])
 
 
 async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
