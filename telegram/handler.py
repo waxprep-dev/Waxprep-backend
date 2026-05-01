@@ -118,8 +118,10 @@ async def process_telegram_update(update: dict) -> None:
         await tg_onboarding_response(chat_id, conversation, text)
         return
 
+    # Fix: Clear quiz state if a command is used, with correct indentation
     if conv_state.get('current_question') and classify_hard_trigger(text, conv_state):
-    conv_state['current_question'] = None
+        conv_state['current_question'] = None
+
     trigger = classify_hard_trigger(text, conv_state)
 
     # --- Subscription flow ---
@@ -173,7 +175,9 @@ async def process_telegram_update(update: dict) -> None:
         summary = await get_student_profile_summary(student)
         await send_telegram_message(chat_id, summary)
         return
+
     # ----- Quiz answer evaluation ----------------------------------------
+    # Moved here so it checks commands first
     from ai.classifier import looks_like_quiz_answer
     current_question = conv_state.get('current_question')
     if current_question and looks_like_quiz_answer(text):
@@ -191,8 +195,6 @@ async def process_telegram_update(update: dict) -> None:
         response = await handle_suggestion(f"telegram:{chat_id}", student, text)
         await send_telegram_message(chat_id, response)
         return
-
-    
 
     # ----- All other messages → AI brain --------------------------------
     await _think_and_respond_telegram(chat_id, student, conversation, text, conv_state)
@@ -314,10 +316,8 @@ async def _evaluate_and_respond_telegram(chat_id: int, student: dict, conversati
 
     is_correct = student_letter == correct_answer
 
-    # Background mastery update (async, can be fire-and-forget)
     asyncio.ensure_future(record_interaction_outcome(student['id'], subject, topic, difficulty, is_correct))
     
-    # Sync DB update for correct count – must be direct, not wrapped in asyncio.ensure_future
     if is_correct:
         from database.client import supabase
         try:
