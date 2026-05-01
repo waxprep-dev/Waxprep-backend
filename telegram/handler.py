@@ -338,8 +338,12 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
                     fresh_state = {}
             pending = fresh_state.get('current_question')
             if pending and pending.get('question') == question_data.get('question'):
-                # Student didn't answer in time
-                await send_telegram_message(chat_id, "⏰ Time's up! Let's keep moving.")
+                # Student didn't answer in time - Reveal the answer
+                correct = pending.get('correct', pending.get('correct_answer', '?'))
+                await send_telegram_message(
+                    chat_id, 
+                    f"⏰ Time's up! The correct answer was *{correct}*. Would you like an explanation or the next question?"
+                )
                 await ucs(conv_id, 'telegram', str(chat_id), {
                     'conversation_state': {**fresh_state, 'current_question': None}
                 })
