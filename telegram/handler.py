@@ -255,115 +255,124 @@ async def _handle_callback_query(callback_query: dict):
 
 async def _think_and_respond_telegram(chat_id: int, student: dict, conversation: dict,
                                       message: str, conv_state: dict):
+    # ---- Race condition guard ----
+    from database.conversations import acquire_student_lock, release_student_lock
     from telegram.sender import send_telegram_message
-    from database.conversations import (get_conversation_history, update_conversation_state,
-                                        save_message)
-    from database.students import can_student_ask_question, increment_questions_today
-    from ai.brain import think
-    from ai.context_manager import get_full_student_context
-    from helpers import nigeria_today
-
-    can_ask, limit_msg = await can_student_ask_question(student)
-    if not can_ask:
-        await send_telegram_message(chat_id, limit_msg)
+    
+    locked = await acquire_student_lock(student['id'])
+    if not locked:
+        await send_telegram_message(chat_id, "I'm still processing your last message. One moment.")
         return
-
-    today = nigeria_today()
-    if conv_state.get('session_date', '') != today:
-        conv_state['session_questions'] = 0
-        conv_state['session_correct'] = 0
-        conv_state['session_date'] = today
-
-    history = await get_conversation_history(conversation['id'])
-    context = await get_full_student_context(student)
-    recent_subject = conversation.get('current_subject')
-
-    asyncio.ensure_future(save_message(conversation['id'], student['id'], 'telegram', 'user', message))
-
-    # Silent diagnosis: detect hesitation and log signal
-    from features.silent_diagnosis import detect_hesitation, log_signal, count_recent_hesitations
-    if detect_hesitation(message):
-        current_subject = conversation.get('current_subject', 'general')
-        current_topic = conversation.get('current_topic', 'general')
-        asyncio.ensure_future(log_signal(
-            student['id'], current_subject, current_topic, 'hesitation', 'rephrase_request'
-        ))
-
-        # If this is the second or third time they're stuck on the same topic,
-        # inject a "slow down" note into the message for the AI
-        recent_count = await count_recent_hesitations(student['id'], current_subject, current_topic)
-        if recent_count >= 2:
-            message = (
-                f"[STUDENT IS REPEATEDLY CONFUSED ABOUT THIS TOPIC — USE SIMPLER LANGUAGE, "
-                f"SHORTER SENTENCES, A CONCRETE NIGERIAN EXAMPLE, AND CHECK FOR UNDERSTANDING "
-                f"AFTER EACH POINT. DO NOT INTRODUCE NEW CONCEPTS.]\n\n{message}"
-            )
-
+        
     try:
-        response_text, question_data = await think(
-            message=message, student=student, conversation_history=history,
-            recent_subject=recent_subject, context=context
-        )
-    except Exception as e:
-        print(f"AI think error (Telegram): {e}")
-        response_text = f"Something went wrong on my end, {student.get('name', 'Student').split()[0]}. Please try again."
-        question_data = None
+        from database.conversations import (get_conversation_history, update_conversation_state,
+                                            save_message)
+        from database.students import can_student_ask_question, increment_questions_today
+        from ai.brain import think
+        from ai.context_manager import get_full_student_context
+        from helpers import nigeria_today
 
-    keyboard = None
-    if question_data:
-        from telegram.sender import build_quiz_keyboard
-        keyboard = build_quiz_keyboard(question_data)
+        can_ask, limit_msg = await can_student_ask_question(student)
+        if not can_ask:
+            await send_telegram_message(chat_id, limit_msg)
+            return
 
-        subject = question_data.get('subject', recent_subject or '')
-        seconds = _quiz_seconds(subject)
-        timer_hint = f"\n\n⏳ _You have {seconds} seconds._"
-        response_text += timer_hint
+        today = nigeria_today()
+        if conv_state.get('session_date', '') != today:
+            conv_state['session_questions'] = 0
+            conv_state['session_correct'] = 0
+            conv_state['session_date'] = today
 
-    await send_telegram_message(chat_id, response_text, reply_markup=keyboard)
+        history = await get_conversation_history(conversation['id'])
+        context = await get_full_student_context(student)
+        recent_subject = conversation.get('current_subject')
 
-    asyncio.ensure_future(save_message(conversation['id'], student['id'], 'telegram', 'assistant', response_text))
-    asyncio.ensure_future(increment_questions_today(student['id']))
+        asyncio.ensure_future(save_message(conversation['id'], student['id'], 'telegram', 'user', message))
 
-    if question_data:
-        new_state = {**conv_state, 'current_question': question_data, 'session_date': today}
-        subject = question_data.get('subject', recent_subject or '')
-        topic = question_data.get('topic', '')
-        await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
-            'conversation_state': new_state, 'current_subject': subject, 'current_topic': topic
-        })
+        # Silent diagnosis: detect hesitation and log signal
+        from features.silent_diagnosis import detect_hesitation, log_signal, count_recent_hesitations
+        if detect_hesitation(message):
+            current_subject = conversation.get('current_subject', 'general')
+            current_topic = conversation.get('current_topic', 'general')
+            asyncio.ensure_future(log_signal(
+                student['id'], current_subject, current_topic, 'hesitation', 'rephrase_request'
+            ))
 
-        seconds = _quiz_seconds(subject)
-        student_id = student['id']
-        conv_id = conversation['id']
-
-        async def timeout_check():
-            await asyncio.sleep(seconds + 2)
-            from database.conversations import get_or_create_conversation, update_conversation_state as ucs
-            fresh_conv = await get_or_create_conversation(student_id, 'telegram', str(chat_id))
-            fresh_state = fresh_conv.get('conversation_state', {})
-            if isinstance(fresh_state, str):
-                import json
-                try:
-                    fresh_state = json.loads(fresh_state)
-                except Exception:
-                    fresh_state = {}
-            pending = fresh_state.get('current_question')
-            if pending and pending.get('question') == question_data.get('question'):
-                correct = pending.get('correct', pending.get('correct_answer', '?'))
-                await send_telegram_message(
-                    chat_id, 
-                    f"⏰ Time's up! The correct answer was *{correct}*. No worries — you can review it and we'll keep going. Want an explanation or the next question?"
+            recent_count = await count_recent_hesitations(student['id'], current_subject, current_topic)
+            if recent_count >= 2:
+                message = (
+                    f"[STUDENT IS REPEATEDLY CONFUSED ABOUT THIS TOPIC — USE SIMPLER LANGUAGE, "
+                    f"SHORTER SENTENCES, A CONCRETE NIGERIAN EXAMPLE, AND CHECK FOR UNDERSTANDING "
+                    f"AFTER EACH POINT. DO NOT INTRODUCE NEW CONCEPTS.]\n\n{message}"
                 )
-                await ucs(conv_id, 'telegram', str(chat_id), {
-                    'conversation_state': {**fresh_state, 'current_question': None}
-                })
 
-        asyncio.ensure_future(timeout_check())
-    else:
-        if conv_state.get('current_question'):
+        try:
+            response_text, question_data = await think(
+                message=message, student=student, conversation_history=history,
+                recent_subject=recent_subject, context=context
+            )
+        except Exception as e:
+            print(f"AI think error (Telegram): {e}")
+            response_text = f"Something went wrong on my end, {student.get('name', 'Student').split()[0]}. Please try again."
+            question_data = None
+
+        keyboard = None
+        if question_data:
+            from telegram.sender import build_quiz_keyboard
+            keyboard = build_quiz_keyboard(question_data)
+
+            subject = question_data.get('subject', recent_subject or '')
+            seconds = _quiz_seconds(subject)
+            timer_hint = f"\n\n⏳ _You have {seconds} seconds._"
+            response_text += timer_hint
+
+        await send_telegram_message(chat_id, response_text, reply_markup=keyboard)
+
+        asyncio.ensure_future(save_message(conversation['id'], student['id'], 'telegram', 'assistant', response_text))
+        asyncio.ensure_future(increment_questions_today(student['id']))
+
+        if question_data:
+            new_state = {**conv_state, 'current_question': question_data, 'session_date': today}
+            subject = question_data.get('subject', recent_subject or '')
+            topic = question_data.get('topic', '')
             await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
-                'conversation_state': {**conv_state, 'current_question': None}
+                'conversation_state': new_state, 'current_subject': subject, 'current_topic': topic
             })
+
+            seconds = _quiz_seconds(subject)
+            student_id = student['id']
+            conv_id = conversation['id']
+
+            async def timeout_check():
+                await asyncio.sleep(seconds + 2)
+                from database.conversations import get_or_create_conversation, update_conversation_state as ucs
+                fresh_conv = await get_or_create_conversation(student_id, 'telegram', str(chat_id))
+                fresh_state = fresh_conv.get('conversation_state', {})
+                if isinstance(fresh_state, str):
+                    import json
+                    try:
+                        fresh_state = json.loads(fresh_state)
+                    except Exception:
+                        fresh_state = {}
+                pending = fresh_state.get('current_question')
+                if pending and pending.get('question') == question_data.get('question'):
+                    correct = pending.get('correct', pending.get('correct_answer', '?'))
+                    await send_telegram_message(
+                        chat_id, 
+                        f"⏰ Time's up! The correct answer was *{correct}*. No worries — you can review it and we'll keep going. Want an explanation or the next question?"
+                    )
+                    await ucs(conv_id, 'telegram', str(chat_id), {
+                        'conversation_state': {**fresh_state, 'current_question': None}
+                    })
+
+            asyncio.ensure_future(timeout_check())
+        else:
+            if conv_state.get('current_question'):
+                await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
+                    'conversation_state': {**conv_state, 'current_question': None}
+                })
+    finally:
+        release_student_lock(student['id'])
 
 
 async def _evaluate_and_respond_telegram(chat_id: int, student: dict, conversation: dict,
