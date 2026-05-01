@@ -6,7 +6,7 @@ Includes quiz timer with subject‑based durations.
 
 import asyncio
 from config.settings import settings
-from helpers import sanitize_input
+from helpers import sanitize_input, nigeria_now
 
 # ---------- Subject‑based quiz timer (seconds) ----------
 QUIZ_TIMERS = {
@@ -277,6 +277,31 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
             await send_telegram_message(chat_id, limit_msg)
             return
 
+        # ---- Long‑pause re‑entry (Fix 6) ----
+        from datetime import datetime, timedelta
+        last_ts = conversation.get('last_message_at')
+        if last_ts:
+            try:
+                last_dt = datetime.fromisoformat(str(last_ts).replace('Z', '+00:00'))
+                now_nig = nigeria_now()
+                gap = (now_nig - last_dt.replace(tzinfo=now_nig.tzinfo) 
+                       if last_dt.tzinfo is None else now_nig - last_dt)
+                if gap > timedelta(hours=1):
+                    current_subject = conversation.get('current_subject', 'General Studies')
+                    topic = conversation.get('current_topic', 'where we left off')
+                    warm_greeting = (
+                        f"It's been a while—welcome back! "
+                        f"We were on {current_subject} – {topic}. "
+                        f"Ready to keep going?"
+                    )
+                    await send_telegram_message(chat_id, warm_greeting)
+                    # Update state immediately to prevent re-triggering this session
+                    await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
+                        'last_message_at': now_nig.isoformat()
+                    })
+            except Exception as e:
+                print(f"Pause re-entry error: {e}")
+
         today = nigeria_today()
         if conv_state.get('session_date', '') != today:
             conv_state['session_questions'] = 0
@@ -336,7 +361,8 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
             subject = question_data.get('subject', recent_subject or '')
             topic = question_data.get('topic', '')
             await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
-                'conversation_state': new_state, 'current_subject': subject, 'current_topic': topic
+                'conversation_state': new_state, 'current_subject': subject, 'current_topic': topic,
+                'last_message_at': nigeria_now().isoformat()
             })
 
             seconds = _quiz_seconds(subject)
@@ -362,14 +388,20 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
                         f"⏰ Time's up! The correct answer was *{correct}*. No worries — you can review it and we'll keep going. Want an explanation or the next question?"
                     )
                     await ucs(conv_id, 'telegram', str(chat_id), {
-                        'conversation_state': {**fresh_state, 'current_question': None}
+                        'conversation_state': {**fresh_state, 'current_question': None},
+                        'last_message_at': nigeria_now().isoformat()
                     })
 
             asyncio.ensure_future(timeout_check())
         else:
             if conv_state.get('current_question'):
                 await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
-                    'conversation_state': {**conv_state, 'current_question': None}
+                    'conversation_state': {**conv_state, 'current_question': None},
+                    'last_message_at': nigeria_now().isoformat()
+                })
+            else:
+                await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
+                    'last_message_at': nigeria_now().isoformat()
                 })
     finally:
         release_student_lock(student['id'])
@@ -471,13 +503,15 @@ async def _evaluate_and_respond_telegram(chat_id: int, student: dict, conversati
         new_subject = new_question_data.get('subject', subject)
         new_topic = new_question_data.get('topic', topic)
         await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
-            'conversation_state': new_state, 'current_subject': new_subject, 'current_topic': new_topic
+            'conversation_state': new_state, 'current_subject': new_subject, 'current_topic': new_topic,
+            'last_message_at': nigeria_now().isoformat()
         })
     else:
         new_state = {**conv_state, 'current_question': None, 'session_questions': session_q,
                      'session_correct': session_correct, 'session_date': today}
         await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
-            'conversation_state': new_state
+            'conversation_state': new_state,
+            'last_message_at': nigeria_now().isoformat()
         })
 
     asyncio.ensure_future(increment_questions_today(student['id']))
