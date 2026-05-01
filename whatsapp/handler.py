@@ -446,7 +446,7 @@ async def _confirm_cancel(phone: str, student: dict, conversation: dict,
         name = student.get('name', 'Student').split()[0]
         await send_whatsapp_message(
             phone,
-            f"Cancellation noted, {name}. Your plan access continues until it expires.\n\n"
+            f"Cancellation noted, {name} (ID: {student.get('wax_id')}). Your plan access continues until it expires.\n\n"
             "Your progress, WAX ID, and streak are all kept. "
             "Come back anytime — type *SUBSCRIBE* to reactivate."
         )
@@ -499,6 +499,15 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
     asyncio.ensure_future(save_message(
         conversation['id'], student['id'], 'whatsapp', 'user', message
     ))
+
+    # Silent diagnosis: detect hesitation and log signal
+    from features.silent_diagnosis import detect_hesitation, log_signal
+    if detect_hesitation(message):
+        current_subject = conversation.get('current_subject', 'general')
+        current_topic = conversation.get('current_topic', 'general')
+        asyncio.ensure_future(log_signal(
+            student['id'], current_subject, current_topic, 'hesitation', 'rephrase_request'
+        ))
 
     # Call AI brain
     try:
@@ -979,3 +988,4 @@ async def _send_diagnostic(phone: str):
         await send_whatsapp_message(phone, msg)
     except Exception as e:
         await send_whatsapp_message(phone, f"Diagnostic error: {str(e)[:200]}")
+
