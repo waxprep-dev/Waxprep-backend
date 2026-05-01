@@ -508,14 +508,22 @@ async def _step_exam_date(phone: str, conversation: dict, message: str, state: d
         exam_dt = datetime(year, month, 15)
         days_left = max(1, (exam_dt - datetime.now()).days)
     elif msg in ['not sure', 'soon', 'this year', 'idk', "don't know", 'unsure', 'no', 'skip']:
-        future = nigeria_now() + timedelta(days=180)
-        exam_date = future.strftime('%Y-%m-%d')
-        days_left = 180
+        # Calculate exam year based on class level
+        class_level = state.get('class_level', 'SS3')
+        if 'SS1' in class_level:
+            years_ahead = 2
+        elif 'SS2' in class_level:
+            years_ahead = 1
+        else:
+            years_ahead = 0
+        future_year = nigeria_now().year + years_ahead
+        exam_date = f"{future_year}-06-15"
+        days_left = max(1, (datetime(future_year, 6, 15) - datetime.now()).days)
 
     if not exam_date:
         await send_whatsapp_message(
             phone,
-            "When is your exam?\n\nTry:\n- May 2025\n- June 2025\n- Not sure"
+            "When is your exam?\n\nTry:\n- May 2026\n- June 2026\n- Not sure"
         )
         return
 
