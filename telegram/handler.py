@@ -79,7 +79,6 @@ async def process_telegram_update(update: dict) -> None:
             platform_user_id=str(chat_id)
         )
 
-        # Extract stored state (if any) from the temp conversation
         conv_state = conversation.get('conversation_state', {})
         if isinstance(conv_state, str):
             import json
@@ -90,18 +89,15 @@ async def process_telegram_update(update: dict) -> None:
 
         awaiting = conv_state.get('awaiting_response_for', '')
 
-        # If the user is already in an onboarding flow, continue it
         from ai.classifier import ONBOARDING_STATES
         if awaiting and awaiting in ONBOARDING_STATES:
             from telegram.onboarding import handle_onboarding_response as tg_onboarding_response
             await tg_onboarding_response(chat_id, conversation, text)
         else:
-            # Otherwise, start fresh onboarding
             from telegram.onboarding import handle_new_or_existing as tg_onboarding
             await tg_onboarding(chat_id, conversation, text)
         return
 
-    # ----- Student is banned --------------------------------------------
     if student.get('is_banned'):
         await send_telegram_message(
             chat_id,
@@ -121,7 +117,7 @@ async def process_telegram_update(update: dict) -> None:
         await _send_diagnostic_telegram(chat_id)
         return
 
-    # ----- Hard trigger check (like SUBSCRIBE, MYID, etc.) -------------
+    # ----- Hard trigger check -------------------------------------------
     from ai.classifier import classify_hard_trigger, ONBOARDING_STATES
     from database.conversations import get_or_create_conversation
 
@@ -140,13 +136,11 @@ async def process_telegram_update(update: dict) -> None:
 
     awaiting = conv_state.get('awaiting_response_for', '')
 
-    # ----- Continue onboarding if the student is still in the flow ------
     if awaiting and awaiting in ONBOARDING_STATES:
         from telegram.onboarding import handle_onboarding_response as tg_onboarding_response
         await tg_onboarding_response(chat_id, conversation, text)
         return
 
-    # Fix: Clear quiz state if a command is used, with correct indentation
     if conv_state.get('current_question') and classify_hard_trigger(text, conv_state):
         conv_state['current_question'] = None
 
@@ -228,7 +222,6 @@ async def process_telegram_update(update: dict) -> None:
 
 
 async def _handle_callback_query(callback_query: dict):
-    """Inline button press – treat as normal text answer."""
     from telegram.sender import send_telegram_message
     data = callback_query.get('data', '')
     message = callback_query.get('message', {})
@@ -283,13 +276,23 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
     asyncio.ensure_future(save_message(conversation['id'], student['id'], 'telegram', 'user', message))
 
     # Silent diagnosis: detect hesitation and log signal
-    from features.silent_diagnosis import detect_hesitation, log_signal
+    from features.silent_diagnosis import detect_hesitation, log_signal, count_recent_hesitations
     if detect_hesitation(message):
         current_subject = conversation.get('current_subject', 'general')
         current_topic = conversation.get('current_topic', 'general')
         asyncio.ensure_future(log_signal(
             student['id'], current_subject, current_topic, 'hesitation', 'rephrase_request'
         ))
+
+        # If this is the second or third time they're stuck on the same topic,
+        # inject a "slow down" note into the message for the AI
+        recent_count = await count_recent_hesitations(student['id'], current_subject, current_topic)
+        if recent_count >= 2:
+            message = (
+                f"[STUDENT IS REPEATEDLY CONFUSED ABOUT THIS TOPIC — USE SIMPLER LANGUAGE, "
+                f"SHORTER SENTENCES, A CONCRETE NIGERIAN EXAMPLE, AND CHECK FOR UNDERSTANDING "
+                f"AFTER EACH POINT. DO NOT INTRODUCE NEW CONCEPTS.]\n\n{message}"
+            )
 
     try:
         response_text, question_data = await think(
@@ -301,17 +304,13 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
         response_text = f"Something went wrong on my end, {student.get('name', 'Student').split()[0]}. Please try again."
         question_data = None
 
-    # If the AI generated a quiz question, attach tappable answer buttons AND start a timer
     keyboard = None
     if question_data:
         from telegram.sender import build_quiz_keyboard
         keyboard = build_quiz_keyboard(question_data)
 
-        # Determine timer length for this subject
         subject = question_data.get('subject', recent_subject or '')
         seconds = _quiz_seconds(subject)
-
-        # Append a gentle timer hint to the response
         timer_hint = f"\n\n⏳ _You have {seconds} seconds._"
         response_text += timer_hint
 
@@ -328,14 +327,12 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
             'conversation_state': new_state, 'current_subject': subject, 'current_topic': topic
         })
 
-        # ----- Start background timer for auto‑timeout -----
         seconds = _quiz_seconds(subject)
         student_id = student['id']
         conv_id = conversation['id']
 
         async def timeout_check():
             await asyncio.sleep(seconds + 2)
-            # Reload conversation state to see if the question is still pending
             from database.conversations import get_or_create_conversation, update_conversation_state as ucs
             fresh_conv = await get_or_create_conversation(student_id, 'telegram', str(chat_id))
             fresh_state = fresh_conv.get('conversation_state', {})
@@ -347,7 +344,6 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
                     fresh_state = {}
             pending = fresh_state.get('current_question')
             if pending and pending.get('question') == question_data.get('question'):
-                # Student didn't answer in time - Reveal the answer
                 correct = pending.get('correct', pending.get('correct_answer', '?'))
                 await send_telegram_message(
                     chat_id, 
@@ -441,7 +437,6 @@ async def _evaluate_and_respond_telegram(chat_id: int, student: dict, conversati
         recent_subject=conversation.get('current_subject'), context=context, quiz_context=quiz_ctx
     )
 
-    # Attach keyboard for the NEXT question if the AI generated one
     keyboard = None
     if new_question_data:
         from telegram.sender import build_quiz_keyboard
