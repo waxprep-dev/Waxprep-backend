@@ -273,10 +273,21 @@ async def _step_exam_date(phone: str, conversation: dict, message: str, state: d
         days_left = (datetime(future_yr, 6, 15) - datetime.now()).days
     else:
         # Simple extraction
-        yr_m = re.search(r'202[4-9]', msg)
+        yr_m = re.search(r'20(2[4-9]|[3-9]\d)', msg)
         if yr_m:
-            exam_date = f"{yr_m.group(0)}-06-15"
-            days_left = (datetime(int(yr_m.group(0)), 6, 15) - datetime.now()).days
+            year = int(yr_m.group(0))
+            # Rough month check for common exam months
+            month = 5 if 'may' in msg else (6 if 'jun' in msg else 6)
+            exam_dt = datetime(year, month, 15)
+            now_dt = datetime.now()
+            
+            if exam_dt < now_dt:
+                await send_whatsapp_message(phone, "That date is already in the past! Please enter a future exam date.\n\nTry: May 2026, June 2026, or type *Not sure*")
+                return
+                
+            exam_date = f"{year}-{month:02d}-15"
+            days_left = (exam_dt - now_dt).days
+            
     if not exam_date:
         await send_whatsapp_message(phone, "Tell me the month and year (e.g. May 2026).")
         return
@@ -323,7 +334,6 @@ async def _step_pin_confirm(phone: str, conversation: dict, message: str, state:
         await update_conversation_state(conversation['id'], 'whatsapp', phone, {'student_id': student['id'], 'current_mode': 'default', 'conversation_state': {}})
         fire_and_forget(notify_admin_new_student(student, phone))
         
-        # FIX START: Personalised Welcome Message
         subjects = state.get('subjects', [])
         intro = get_welcome_intro(subjects)
         class_lvl = state.get('class_level', 'your class')
