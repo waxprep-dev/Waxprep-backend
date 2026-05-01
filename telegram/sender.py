@@ -43,6 +43,8 @@ def build_quiz_keyboard(question: dict) -> dict | None:
     returns a Telegram inline keyboard markup.
     Returns None if the question is not a valid multiple‑choice.
     """
+    print(f"KEYBOARD DEBUG: a={question.get('a')}, b={question.get('b')}, opt_a={question.get('option_a')}")
+    
     opt_a = question.get('a', question.get('option_a', ''))
     opt_b = question.get('b', question.get('option_b', ''))
     opt_c = question.get('c', question.get('option_c', ''))
