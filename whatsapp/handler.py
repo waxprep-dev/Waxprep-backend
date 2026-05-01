@@ -10,7 +10,7 @@ function throwing unhandled exceptions. Now fully wrapped with error handling.
 import asyncio
 import re
 from config.settings import settings
-from helpers import nigeria_today, get_time_of_day, sanitize_input
+from helpers import nigeria_today, nigeria_now, get_time_of_day, sanitize_input
 
 
 def _get_state(conversation: dict) -> dict:
@@ -492,6 +492,31 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
             await send_whatsapp_message(phone, limit_msg)
             return
 
+        # ---- Long‑pause re‑entry (Fix 6) ----
+        from datetime import datetime, timedelta
+        last_ts = conversation.get('last_message_at')
+        if last_ts:
+            try:
+                last_dt = datetime.fromisoformat(str(last_ts).replace('Z', '+00:00'))
+                now_nig = nigeria_now()
+                gap = (now_nig - last_dt.replace(tzinfo=now_nig.tzinfo) 
+                       if last_dt.tzinfo is None else now_nig - last_dt)
+                if gap > timedelta(hours=1):
+                    current_subject = conversation.get('current_subject', 'General Studies')
+                    topic = conversation.get('current_topic', 'where we left off')
+                    warm_greeting = (
+                        f"It's been a while—welcome back! "
+                        f"We were on {current_subject} – {topic}. "
+                        f"Ready to keep going?"
+                    )
+                    await send_whatsapp_message(phone, warm_greeting)
+                    # Update state immediately to prevent re-triggering this session
+                    await update_conversation_state(conversation['id'], 'whatsapp', phone, {
+                        'last_message_at': now_nig.isoformat()
+                    })
+            except Exception as e:
+                print(f"Pause re-entry error: {e}")
+
         today = nigeria_today()
         if conv_state.get('session_date', '') != today:
             conv_state['session_questions'] = 0
@@ -567,6 +592,7 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
                     'conversation_state': new_state,
                     'current_subject': subject,
                     'current_topic': topic,
+                    'last_message_at': nigeria_now().isoformat()
                 }
             )
         else:
@@ -574,7 +600,15 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
                 new_state = {**conv_state, 'current_question': None}
                 asyncio.ensure_future(update_conversation_state(
                     conversation['id'], 'whatsapp', phone,
-                    {'conversation_state': new_state}
+                    {
+                        'conversation_state': new_state,
+                        'last_message_at': nigeria_now().isoformat()
+                    }
+                ))
+            else:
+                asyncio.ensure_future(update_conversation_state(
+                    conversation['id'], 'whatsapp', phone,
+                    {'last_message_at': nigeria_now().isoformat()}
                 ))
 
             detected_subject = extract_subject_from_message(message)
@@ -716,6 +750,7 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
                     'conversation_state': new_state,
                     'current_subject': new_subject,
                     'current_topic': new_topic,
+                    'last_message_at': nigeria_now().isoformat()
                 }
             )
         else:
@@ -728,7 +763,10 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
             }
             await update_conversation_state(
                 conversation['id'], 'whatsapp', phone,
-                {'conversation_state': new_state}
+                {
+                    'conversation_state': new_state,
+                    'last_message_at': nigeria_now().isoformat()
+                }
             )
 
         asyncio.ensure_future(increment_questions_today(student['id']))
@@ -756,7 +794,10 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
             broken_state = {**conv_state, 'current_question': None}
             await update_conversation_state(
                 conversation['id'], 'whatsapp', phone,
-                {'conversation_state': broken_state}
+                {
+                    'conversation_state': broken_state,
+                    'last_message_at': nigeria_now().isoformat()
+                }
             )
             await _think_and_respond(phone, student, conversation, message, broken_state)
         except Exception:
