@@ -212,6 +212,13 @@ async def route_message(phone: str, name: str, message: str,
     if message_type in ['voice', 'audio']:
         await _handle_voice(phone, student, conversation, media_id, conv_state)
         return
+    # 7. Check if student is answering a pending quiz question
+    from ai.classifier import looks_like_quiz_answer
+
+    current_question = conv_state.get('current_question')
+    if current_question and looks_like_quiz_answer(message):
+        await _evaluate_and_respond(phone, student, conversation, message, conv_state)
+        return
 
     # 6. Hard-coded trigger check
     trigger = classify_hard_trigger(message, conv_state)
@@ -288,14 +295,7 @@ async def route_message(phone: str, name: str, message: str,
         await _confirm_cancel(phone, student, conversation, message, conv_state)
         return
 
-    # 7. Check if student is answering a pending quiz question
-    from ai.classifier import looks_like_quiz_answer
-
-    current_question = conv_state.get('current_question')
-    if current_question and looks_like_quiz_answer(message):
-        await _evaluate_and_respond(phone, student, conversation, message, conv_state)
-        return
-
+    
     # 8. Everything else goes to the AI brain
     await _think_and_respond(phone, student, conversation, message, conv_state)
 
