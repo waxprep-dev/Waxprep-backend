@@ -174,7 +174,7 @@ async def process_telegram_update(update: dict) -> None:
     if trigger == 'MYPLAN' or trigger == 'MY PLAN':
         from database.students import get_student_subscription_status
         from helpers import format_naira
-        status = await get_student_subscription_status(status)
+        status = await get_student_subscription_status(student)
         name = student.get('name', 'Student').split()[0]
         tier = status['display_tier']
         days = status.get('days_remaining')
@@ -198,6 +198,11 @@ async def process_telegram_update(update: dict) -> None:
         await send_telegram_message(chat_id, summary)
         return
 
+    if trigger == 'TEST':
+        from features.test_harness import handle_test_command
+        await handle_test_command(chat_id, student, conversation, text)
+        return
+
     # ----- Quiz answer evaluation ----------------------------------------
     from ai.classifier import looks_like_quiz_answer
     current_question = conv_state.get('current_question')
@@ -215,12 +220,6 @@ async def process_telegram_update(update: dict) -> None:
         from features.feedback import handle_suggestion
         response = await handle_suggestion(f"telegram:{chat_id}", student, text)
         await send_telegram_message(chat_id, response)
-        return
-
-    # --- Founder Test Harness ---
-    if msg_upper.startswith('TEST'):
-        from features.test_harness import handle_test_command
-        await handle_test_command(chat_id, student, conversation, text)
         return
 
     # ----- All other messages → AI brain --------------------------------
