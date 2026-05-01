@@ -11,7 +11,7 @@ import re
 # Commands that need specific non-AI handling
 HARD_COMMANDS = {
     'SUBSCRIBE', 'MYID', 'MY ID', 'PAYG', 'BILLING', 'MYPLAN', 'MY PLAN',
-    'CANCEL', 'PING',
+    'CANCEL', 'PING', 'SUBSCRIBE MONTHLY', 'SUBSCRIBE YEARLY',
 }
 
 # Promo code triggers
