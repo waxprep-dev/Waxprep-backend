@@ -325,7 +325,7 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
         conv_id = conversation['id']
 
         async def timeout_check():
-            await asyncio.sleep(seconds)
+            await asyncio.sleep(seconds + 2)
             # Reload conversation state to see if the question is still pending
             from database.conversations import get_or_create_conversation, update_conversation_state as ucs
             fresh_conv = await get_or_create_conversation(student_id, 'telegram', str(chat_id))
@@ -342,7 +342,7 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
                 correct = pending.get('correct', pending.get('correct_answer', '?'))
                 await send_telegram_message(
                     chat_id, 
-                    f"⏰ Time's up! The correct answer was *{correct}*. Would you like an explanation or the next question?"
+                    f"⏰ Time's up! The correct answer was *{correct}*. No worries — you can review it and we'll keep going. Want an explanation or the next question?"
                 )
                 await ucs(conv_id, 'telegram', str(chat_id), {
                     'conversation_state': {**fresh_state, 'current_question': None}
