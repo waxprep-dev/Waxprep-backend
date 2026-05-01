@@ -171,7 +171,13 @@ async def process_telegram_update(update: dict) -> None:
         summary = await get_student_profile_summary(student)
         await send_telegram_message(chat_id, summary)
         return
-
+    # ----- Quiz answer evaluation ----------------------------------------
+    from ai.classifier import looks_like_quiz_answer
+    current_question = conv_state.get('current_question')
+    if current_question and looks_like_quiz_answer(text):
+        await _evaluate_and_respond_telegram(chat_id, student, conversation, text, conv_state)
+        return
+        
     # --- Bug/suggest ---
     if trigger == 'BUG':
         from features.feedback import handle_bug_report
@@ -184,12 +190,7 @@ async def process_telegram_update(update: dict) -> None:
         await send_telegram_message(chat_id, response)
         return
 
-    # ----- Quiz answer evaluation ----------------------------------------
-    from ai.classifier import looks_like_quiz_answer
-    current_question = conv_state.get('current_question')
-    if current_question and looks_like_quiz_answer(text):
-        await _evaluate_and_respond_telegram(chat_id, student, conversation, text, conv_state)
-        return
+    
 
     # ----- All other messages → AI brain --------------------------------
     await _think_and_respond_telegram(chat_id, student, conversation, text, conv_state)
