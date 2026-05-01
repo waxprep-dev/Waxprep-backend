@@ -1,11 +1,39 @@
 """
 Telegram Message Handler
 Uses the same AI brain, DB, and flows but sends replies via Telegram (not WhatsApp).
+Includes quiz timer with subject‑based durations.
 """
 
 import asyncio
 from config.settings import settings
 from helpers import sanitize_input
+
+# ---------- Subject‑based quiz timer (seconds) ----------
+QUIZ_TIMERS = {
+    'physics': 50,
+    'chemistry': 50,
+    'mathematics': 60,
+    'further mathematics': 70,
+    'biology': 35,
+    'economics': 35,
+    'government': 35,
+    'literature in english': 40,
+    'english language': 40,
+    'geography': 40,
+    'commerce': 35,
+    'agricultural science': 35,
+    'computer studies': 40,
+    'christian religious studies': 30,
+    'islamic religious studies': 30,
+}
+DEFAULT_QUIZ_TIMER = 35   # fallback for any subject not listed
+
+
+def _quiz_seconds(subject: str) -> int:
+    """Return the quiz time limit for a given subject."""
+    if not subject:
+        return DEFAULT_QUIZ_TIMER
+    return QUIZ_TIMERS.get(subject.strip().lower(), DEFAULT_QUIZ_TIMER)
 
 
 async def process_telegram_update(update: dict) -> None:
@@ -177,13 +205,12 @@ async def process_telegram_update(update: dict) -> None:
         return
 
     # ----- Quiz answer evaluation ----------------------------------------
-    # Moved here so it checks commands first
     from ai.classifier import looks_like_quiz_answer
     current_question = conv_state.get('current_question')
     if current_question and looks_like_quiz_answer(text):
         await _evaluate_and_respond_telegram(chat_id, student, conversation, text, conv_state)
         return
-        
+
     # --- Bug/suggest ---
     if trigger == 'BUG':
         from features.feedback import handle_bug_report
@@ -265,14 +292,22 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
         response_text = f"Something went wrong on my end, {student.get('name', 'Student').split()[0]}. Please try again."
         question_data = None
 
-    # If the AI generated a quiz question, attach tappable answer buttons
+    # If the AI generated a quiz question, attach tappable answer buttons AND start a timer
     keyboard = None
     if question_data:
         from telegram.sender import build_quiz_keyboard
         keyboard = build_quiz_keyboard(question_data)
 
+        # Determine timer length for this subject
+        subject = question_data.get('subject', recent_subject or '')
+        seconds = _quiz_seconds(subject)
+
+        # Append a gentle timer hint to the response
+        timer_hint = f"\n\n⏳ _You have {seconds} seconds._"
+        response_text += timer_hint
+
     await send_telegram_message(chat_id, response_text, reply_markup=keyboard)
-    
+
     asyncio.ensure_future(save_message(conversation['id'], student['id'], 'telegram', 'assistant', response_text))
     asyncio.ensure_future(increment_questions_today(student['id']))
 
@@ -283,6 +318,33 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
         await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
             'conversation_state': new_state, 'current_subject': subject, 'current_topic': topic
         })
+
+        # ----- Start background timer for auto‑timeout -----
+        seconds = _quiz_seconds(subject)
+        student_id = student['id']
+        conv_id = conversation['id']
+
+        async def timeout_check():
+            await asyncio.sleep(seconds)
+            # Reload conversation state to see if the question is still pending
+            from database.conversations import get_or_create_conversation, update_conversation_state as ucs
+            fresh_conv = await get_or_create_conversation(student_id, 'telegram', str(chat_id))
+            fresh_state = fresh_conv.get('conversation_state', {})
+            if isinstance(fresh_state, str):
+                import json
+                try:
+                    fresh_state = json.loads(fresh_state)
+                except Exception:
+                    fresh_state = {}
+            pending = fresh_state.get('current_question')
+            if pending and pending.get('question') == question_data.get('question'):
+                # Student didn't answer in time
+                await send_telegram_message(chat_id, "⏰ Time's up! Let's keep moving.")
+                await ucs(conv_id, 'telegram', str(chat_id), {
+                    'conversation_state': {**fresh_state, 'current_question': None}
+                })
+
+        asyncio.ensure_future(timeout_check())
     else:
         if conv_state.get('current_question'):
             await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
@@ -324,7 +386,7 @@ async def _evaluate_and_respond_telegram(chat_id: int, student: dict, conversati
     is_correct = student_letter == correct_answer
 
     asyncio.ensure_future(record_interaction_outcome(student['id'], subject, topic, difficulty, is_correct))
-    
+
     if is_correct:
         from database.client import supabase
         try:
@@ -373,7 +435,7 @@ async def _evaluate_and_respond_telegram(chat_id: int, student: dict, conversati
         keyboard = build_quiz_keyboard(new_question_data)
 
     await send_telegram_message(chat_id, response_text, reply_markup=keyboard)
-    
+
     asyncio.ensure_future(save_message(conversation['id'], student['id'], 'telegram', 'user', message))
     asyncio.ensure_future(save_message(conversation['id'], student['id'], 'telegram', 'assistant', response_text))
 
