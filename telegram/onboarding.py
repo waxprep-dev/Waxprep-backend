@@ -354,26 +354,48 @@ async def _step_target_exam(chat_id: int, conversation: dict, message: str, stat
         '4': 'COMMON_ENTRANCE', 'COMMON': 'COMMON_ENTRANCE',
         '5': 'POST_UTME', 'POST': 'POST_UTME', 'POSTUTME': 'POST_UTME',
     }
-    target_exam = None
+    
+    target_exams = []
     for key, value in exam_map.items():
         if key in msg:
-            target_exam = value
-            break
+            target_exams.append(value)
+    target_exam = target_exams[0] if target_exams else None
+    is_multi_exam = len(target_exams) > 1
+
     if not target_exam:
         await send_telegram_message(chat_id, "Please reply with 1, 2, 3, 4, or 5 to choose your exam.")
         return
 
-    available_subjects = EXAMS_SUBJECTS.get(target_exam, EXAM_SUBJECTS['JAMB'])
+    if is_multi_exam:
+        # Combine subjects from all selected exams
+        available_subjects = []
+        for exam in target_exams:
+            for sub in EXAM_SUBJECTS.get(exam, []):
+                if sub not in available_subjects:
+                    available_subjects.append(sub)
+        exam_display = " + ".join(target_exams)
+        note = f"{exam_display} — pick all the subjects you're sitting for."
+    else:
+        available_subjects = EXAM_SUBJECTS.get(target_exam, EXAM_SUBJECTS['JAMB'])
+        note = "JAMB requires 4 subjects (English + 3 others)." if target_exam == 'JAMB' else "Which subjects are you sitting for?"
+
     subject_list = '\n'.join([f"{i+1}. {sub}" for i, sub in enumerate(available_subjects[:15])])
-    note = "JAMB requires 4 subjects (English + 3 others)." if target_exam == 'JAMB' else "Which subjects are you sitting for?"
 
     await send_telegram_message(
         chat_id,
-        f"{target_exam}!\n\n{note}\n\n{subject_list}\n\n"
+        f"{' + '.join(target_exams) if is_multi_exam else target_exam}!\n\n"
+        f"{note}\n\n"
+        f"{subject_list}\n\n"
         "_(Reply with numbers separated by commas: e.g. 1,2,4,6)_"
     )
     await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
-        'conversation_state': {**state, 'target_exam': target_exam, 'available_subjects': available_subjects, 'awaiting_response_for': 'subjects'}
+        'conversation_state': {
+            **state, 
+            'target_exam': 'Multiple' if is_multi_exam else target_exam, 
+            'target_exams': target_exams,
+            'available_subjects': available_subjects, 
+            'awaiting_response_for': 'subjects'
+        }
     })
 
 
@@ -404,7 +426,7 @@ async def _step_subjects(chat_id: int, conversation: dict, message: str, state: 
         chat_id,
         f"Your subjects:\n{subjects_display}\n\n"
         "When is your exam?\n\n"
-        "_(e.g. May 2025 or June 2025 or Not sure)_"
+        "_(e.g. May 2026 or June 2026 or Not sure)_"
     )
     await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
         'conversation_state': {**state, 'subjects': selected, 'awaiting_response_for': 'exam_date'}
@@ -436,12 +458,19 @@ async def _step_exam_date(chat_id: int, conversation: dict, message: str, state:
         exam_dt = datetime(year, month, 15)
         days_left = max(1, (exam_dt - datetime.now()).days)
     elif msg in ['not sure', 'soon', 'this year', 'idk', "don't know", 'unsure', 'no', 'skip']:
-        future = nigeria_now() + timedelta(days=180)
-        exam_date = future.strftime('%Y-%m-%d')
-        days_left = 180
+        class_level = state.get('class_level', 'SS3')
+        if 'SS1' in class_level:
+            years_ahead = 2
+        elif 'SS2' in class_level:
+            years_ahead = 1
+        else:
+            years_ahead = 0
+        future_year = nigeria_now().year + years_ahead
+        exam_date = f"{future_year}-06-15"
+        days_left = max(1, (datetime(future_year, 6, 15) - datetime.now()).days)
 
     if not exam_date:
-        await send_telegram_message(chat_id, "When is your exam?\n\nTry:\n- May 2025\n- June 2025\n- Not sure")
+        await send_telegram_message(chat_id, "When is your exam?\n\nTry:\n- May 2026\n- June 2026\n- Not sure")
         return
 
     if days_left < 30:
@@ -527,7 +556,6 @@ async def _step_pin_confirm(chat_id: int, conversation: dict, message: str, stat
         return
 
     try:
-        # Phone field can be "telegram:{chat_id}" – it will be stored as platform_user_id
         student = await create_student(
             phone=f"telegram:{chat_id}",
             name=state.get('name', 'Student'),
