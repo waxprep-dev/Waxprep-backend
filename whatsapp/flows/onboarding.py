@@ -398,23 +398,35 @@ async def _step_target_exam(phone: str, conversation: dict, message: str, state:
         '5': 'POST_UTME', 'POST': 'POST_UTME', 'POSTUTME': 'POST_UTME',
     }
 
-    target_exam = None
+    target_exams = []
     for key, value in exam_map.items():
         if key in msg:
-            target_exam = value
-            break
+            target_exams.append(value)
+    target_exam = target_exams[0] if target_exams else None
+    is_multi_exam = len(target_exams) > 1
 
     if not target_exam:
         await send_whatsapp_message(phone, "Please reply with 1, 2, 3, 4, or 5 to choose your exam.")
         return
 
-    available_subjects = EXAM_SUBJECTS.get(target_exam, EXAM_SUBJECTS['JAMB'])
+    if is_multi_exam:
+        # Combine subjects from all selected exams
+        available_subjects = []
+        for exam in target_exams:
+            for sub in EXAM_SUBJECTS.get(exam, []):
+                if sub not in available_subjects:
+                    available_subjects.append(sub)
+        exam_display = " + ".join(target_exams)
+        note = f"{exam_display} — pick all the subjects you're sitting for."
+    else:
+        available_subjects = EXAM_SUBJECTS.get(target_exam, EXAM_SUBJECTS['JAMB'])
+        note = "JAMB requires 4 subjects (English + 3 others)." if target_exam == 'JAMB' else "Which subjects are you sitting for?"
+
     subject_list = '\n'.join([f"{i+1}. {sub}" for i, sub in enumerate(available_subjects[:15])])
-    note = "JAMB requires 4 subjects (English + 3 others)." if target_exam == 'JAMB' else "Which subjects are you sitting for?"
 
     await send_whatsapp_message(
         phone,
-        f"{target_exam}!\n\n"
+        f"{' + '.join(target_exams) if is_multi_exam else target_exam}!\n\n"
         f"{note}\n\n"
         f"{subject_list}\n\n"
         "_(Reply with numbers separated by commas: e.g. 1,2,4,6)_"
@@ -423,7 +435,8 @@ async def _step_target_exam(phone: str, conversation: dict, message: str, state:
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {
         'conversation_state': {
             **state,
-            'target_exam': target_exam,
+            'target_exam': 'Multiple' if is_multi_exam else target_exam,
+            'target_exams': target_exams, # Store list for tracking
             'available_subjects': available_subjects,
             'awaiting_response_for': 'subjects'
         }
@@ -469,7 +482,7 @@ async def _step_subjects(phone: str, conversation: dict, message: str, state: di
         phone,
         f"Your subjects:\n{subjects_display}\n\n"
         "When is your exam?\n\n"
-        "_(e.g. May 2025 or June 2025 or Not sure)_"
+        "_(e.g. May 2026 or June 2026 or Not sure)_"
     )
 
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {
