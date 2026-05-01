@@ -15,6 +15,7 @@ async def send_telegram_message(chat_id: int, text: str, reply_markup: dict = No
     Sends a text message to a Telegram chat.
     If reply_markup is provided, it will be attached as an inline keyboard.
     Returns True if successful, False otherwise.
+    Includes a fallback mechanism for Markdown parsing errors.
     """
     url = f"{TELEGRAM_API_URL}/sendMessage"
     payload = {
@@ -28,10 +29,21 @@ async def send_telegram_message(chat_id: int, text: str, reply_markup: dict = No
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(url, json=payload)
-            if response.status_code != 200:
-                print(f"Telegram send error: {response.text[:200]}")
-                return False
-            return True
+            if response.status_code == 200:
+                return True
+            
+            # If Markdown parsing failed, retry without formatting
+            error_data = response.json()
+            if response.status_code == 400 and "parse" in str(error_data).lower():
+                payload["parse_mode"] = None
+                retry = await client.post(url, json=payload)
+                if retry.status_code != 200:
+                    print(f"Telegram send error (plain): {retry.text[:200]}")
+                    return False
+                return True
+            
+            print(f"Telegram send error: {response.text[:200]}")
+            return False
     except Exception as e:
         print(f"Telegram send exception: {e}")
         return False
