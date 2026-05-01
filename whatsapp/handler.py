@@ -220,6 +220,8 @@ async def route_message(phone: str, name: str, message: str,
         await _evaluate_and_respond(phone, student, conversation, message, conv_state)
         return
 
+    if conv_state.get('current_question') and classify_hard_trigger(message, conv_state):
+    conv_state['current_question'] = None                         
     # 6. Hard-coded trigger check
     trigger = classify_hard_trigger(message, conv_state)
 
