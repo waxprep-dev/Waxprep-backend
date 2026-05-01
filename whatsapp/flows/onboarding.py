@@ -44,6 +44,78 @@ NIGERIAN_STATES = [
     'Plateau', 'Rivers', 'Sokoto', 'Taraba', 'Yobe', 'Zamfara'
 ]
 
+# ---------- Welcome Message Personalisation ----------
+SUBJECT_INTROS = {
+    ('physics', 'chemistry', 'biology'): (
+        "There's one concept that controls all three sciences: **Energy.** "
+        "It's the same energy that powers a generator (Physics), makes bread "
+        "rise with yeast (Biology), and burns kerosene in a lamp (Chemistry). "
+        "Understand this one thing, and you've already gained ground in three "
+        "subjects at once. It'll take 2 minutes. Ready?"
+    ),
+    ('physics', 'chemistry'): (
+        "There's one idea that connects both your science subjects: **Matter.** "
+        "Everything around you — the air, the water, your phone — is made of "
+        "atoms. Physics tells you how they move. Chemistry tells you how they "
+        "react. Master this link and both subjects become easier. 2 minutes. Ready?"
+    ),
+    ('physics', 'biology'): (
+        "Here's a connection most students miss: **Force and Motion** appear "
+        "in both Physics and Biology. Blood flowing through your body follows "
+        "the same principles as water through a pipe. An okada turning a corner "
+        "is the same physics as your heartbeat. See the link? 2 minutes. Ready?"
+    ),
+    ('chemistry', 'biology'): (
+        "Both your sciences meet at **Chemical Reactions.** Digestion is chemistry "
+        "inside your body. Fermentation is chemistry inside a palm wine gourd. "
+        "Rust on a roof is chemistry in the open air. Same principles, different "
+        "scenes. 2 minutes to connect them. Ready?"
+    ),
+    ('government', 'economics', 'commerce'): (
+        "Your three subjects share one big idea: **Systems.** Government sets "
+        "the rules. Economics tracks the money. Commerce moves the goods. "
+        "Understand how they feed each other, and you understand how Nigeria "
+        "works. 2 minutes. Ready?"
+    ),
+    ('government', 'literature'): (
+        "Both your subjects explore **Power.** Who holds it in a government? "
+        "Who holds it in a story? From the Constitution to Chinua Achebe, the "
+        "same struggle plays out: who gets to decide, and who pays the price. "
+        "2 minutes. Ready?"
+    ),
+    ('economics', 'commerce', 'geography'): (
+        "Your subjects revolve around **Resources.** Where they come from "
+        "(Geography), how they're traded (Commerce), and who profits (Economics). "
+        "Oil from the Delta, cocoa from Ondo, markets from Onitsha — it's all "
+        "connected. 2 minutes. Ready?"
+    ),
+    ('english', 'literature', 'christian religious studies'): (
+        "Your subjects share one thread: **Narrative.** The Bible tells stories "
+        "of faith. Achebe tells stories of change. Your English exam tests how "
+        "well you understand both. Stories shape beliefs — let me show you how. "
+        "2 minutes. Ready?"
+    ),
+    ('mathematics', 'physics', 'chemistry'): (
+        "Your three subjects speak one language: **Equations.** Maths gives you "
+        "the grammar. Physics and Chemistry give you the sentences. Once you "
+        "see equations as a language instead of a punishment, everything shifts. "
+        "2 minutes. Ready?"
+    ),
+}
+
+def get_welcome_intro(subjects: list) -> str:
+    """Return a personalised intro based on the student's subjects."""
+    if not subjects:
+        return "Let's start with the basics and build from there. Ready?"
+    
+    subject_lower = [s.lower().strip() for s in subjects]
+    
+    for combo, intro in SUBJECT_INTROS.items():
+        if all(c in subject_lower for c in combo):
+            return intro
+    
+    first = subjects[0] if subjects else 'your subject'
+    return f"Let's start with {first} — that's a strong choice. We'll build your foundation step by step. Ready?"
 
 async def handle_new_or_existing(phone: str, conversation: dict, message: str):
     from whatsapp.sender import send_whatsapp_message
@@ -686,24 +758,24 @@ async def _step_pin_confirm(phone: str, conversation: dict, message: str, state:
         name_first = student['name'].split()[0]
         days_left = state.get('days_until_exam', 180)
 
+        # Get personalised intro based on subjects
+        subjects = state.get('subjects', [])
+        intro = get_welcome_intro(subjects)
+        
         welcome = (
             f"Welcome to WaxPrep, *{name_first}*!\n\n"
-            f"Your account is ready. *Save these now:*\n\n"
+            f"SS2, three exams — {state.get('target_exam', 'your exams')} — and "
+            f"{days_left} days. That sounds like a lot until you realise other "
+            f"students are already grinding past questions while some are still "
+            f"making up their minds.\n\n"
+            f"No need to worry about what to ask. A student doesn't tell the "
+            f"teacher where the lesson starts — I'll lead, you follow.\n\n"
+            f"Let's get your first quick win.\n\n"
+            f"{intro}\n\n"
+            f"*Your account details — save these:*\n"
             f"WAX ID: *{wax_id}*\n"
             f"Recovery Code: *{recovery_code}*\n\n"
-            f"Write these somewhere safe. They are how you get back in if you lose your phone.\n\n"
             f"*Full Access is now ACTIVE!*\n"
-            f"Everything is unlocked and ready for you.\n\n"
-        )
-
-        if days_left < 180:
-            welcome += f"Your exam is in {days_left} days. Let's make every day count.\n\n"
-
-        welcome += (
-            "What do you want to do?\n\n"
-            "Just ask me any question\n"
-            "Or type *QUIZ [subject]* to get tested\n"
-            "Or type *HELP* to see all commands"
         )
 
         await send_whatsapp_message(phone, welcome)
