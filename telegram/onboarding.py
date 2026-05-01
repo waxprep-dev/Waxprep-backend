@@ -583,7 +583,6 @@ async def _step_pin_confirm(chat_id: int, conversation: dict, message: str, stat
         recovery_code = student['recovery_code']
         name_first = student['name'].split()[0]
         days_left = state.get('days_until_exam', 180)
-        trial_days = settings.TRIAL_DURATION_DAYS
 
         welcome = (
             f"Welcome to WaxPrep, *{name_first}*!\n\n"
@@ -591,8 +590,8 @@ async def _step_pin_confirm(chat_id: int, conversation: dict, message: str, stat
             f"WAX ID: *{wax_id}*\n"
             f"Recovery Code: *{recovery_code}*\n\n"
             f"Write these somewhere safe. They are how you get back in if you lose your phone.\n\n"
-            f"*{trial_days}-Day Full Access Trial is now ACTIVE!*\n"
-            f"Everything is unlocked for {trial_days} days — completely free.\n\n"
+            f"*Full Access is now ACTIVE!*\n"
+            f"Everything is unlocked and ready for you.\n\n"
         )
         if days_left < 180:
             welcome += f"Your exam is in {days_left} days. Let's make every day count.\n\n"
