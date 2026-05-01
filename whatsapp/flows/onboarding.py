@@ -436,7 +436,7 @@ async def _step_target_exam(phone: str, conversation: dict, message: str, state:
         'conversation_state': {
             **state,
             'target_exam': 'Multiple' if is_multi_exam else target_exam,
-            'target_exams': target_exams, # Store list for tracking
+            'target_exams': target_exams, 
             'available_subjects': available_subjects,
             'awaiting_response_for': 'subjects'
         }
@@ -521,7 +521,6 @@ async def _step_exam_date(phone: str, conversation: dict, message: str, state: d
         exam_dt = datetime(year, month, 15)
         days_left = max(1, (exam_dt - datetime.now()).days)
     elif msg in ['not sure', 'soon', 'this year', 'idk', "don't know", 'unsure', 'no', 'skip']:
-        # Calculate exam year based on class level
         class_level = state.get('class_level', 'SS3')
         if 'SS1' in class_level:
             years_ahead = 2
@@ -680,14 +679,12 @@ async def _step_pin_confirm(phone: str, conversation: dict, message: str, state:
             'conversation_state': {},
         })
 
-        # Notify admin immediately — fire and forget (does not block the welcome message)
         fire_and_forget(notify_admin_new_student(student, phone))
 
         wax_id = student['wax_id']
         recovery_code = student['recovery_code']
         name_first = student['name'].split()[0]
         days_left = state.get('days_until_exam', 180)
-        trial_days = settings.TRIAL_DURATION_DAYS
 
         welcome = (
             f"Welcome to WaxPrep, *{name_first}*!\n\n"
@@ -695,8 +692,8 @@ async def _step_pin_confirm(phone: str, conversation: dict, message: str, state:
             f"WAX ID: *{wax_id}*\n"
             f"Recovery Code: *{recovery_code}*\n\n"
             f"Write these somewhere safe. They are how you get back in if you lose your phone.\n\n"
-            f"*{trial_days}-Day Full Access Trial is now ACTIVE!*\n"
-            f"Everything is unlocked for {trial_days} days — completely free.\n\n"
+            f"*Full Access is now ACTIVE!*\n"
+            f"Everything is unlocked and ready for you.\n\n"
         )
 
         if days_left < 180:
@@ -713,8 +710,6 @@ async def _step_pin_confirm(phone: str, conversation: dict, message: str, state:
 
     except Exception as e:
         print(f"Account creation error: {e}")
-        import traceback
-        traceback.print_exc()
         await send_whatsapp_message(
             phone,
             "There was an error creating your account.\n\n"
