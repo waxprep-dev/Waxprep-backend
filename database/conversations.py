@@ -3,6 +3,7 @@ Conversation State Management — Cache-First with Redis temp sessions for anony
 """
 
 import json
+import asyncio
 from helpers import nigeria_now
 from database.cache import (
     cache_conversation, get_cached_conversation, invalidate_conversation
@@ -296,3 +297,27 @@ async def migrate_temp_to_real(
     except Exception as e:
         print(f"migrate_temp_to_real error: {e}")
         return None
+
+
+# --- LOCKING MECHANISM FOR CONCURRENCY ---
+
+async def acquire_student_lock(student_id: str, timeout: int = 10) -> bool:
+    """Try to acquire a processing lock for this student. Returns True if acquired."""
+    key = f"student_lock:{student_id}"
+    # SET with NX (only if not exists) and EX (expire in timeout seconds)
+    try:
+        # Use the raw Redis set with nx and ex parameters
+        result = redis_client.set(key, "1", nx=True, ex=timeout)
+        return result is True
+    except Exception as e:
+        print(f"Lock acquire error: {e}")
+        return True  # fail open — allow processing rather than blocking forever
+
+
+def release_student_lock(student_id: str):
+    """Release the processing lock for this student."""
+    key = f"student_lock:{student_id}"
+    try:
+        redis_client.delete(key)
+    except Exception as e:
+        print(f"Lock release error: {e}")
