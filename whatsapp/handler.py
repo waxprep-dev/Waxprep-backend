@@ -477,7 +477,7 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
     from features.quiz_engine import extract_subject_from_message
     from helpers import nigeria_today
 
-    # Check usage limit (now based on AI cost, not question count)
+    # Check usage limit
     can_ask, limit_msg = await can_student_ask_question(student)
     if not can_ask:
         await send_whatsapp_message(phone, limit_msg)
@@ -501,13 +501,23 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
     ))
 
     # Silent diagnosis: detect hesitation and log signal
-    from features.silent_diagnosis import detect_hesitation, log_signal
+    from features.silent_diagnosis import detect_hesitation, log_signal, count_recent_hesitations
     if detect_hesitation(message):
         current_subject = conversation.get('current_subject', 'general')
         current_topic = conversation.get('current_topic', 'general')
         asyncio.ensure_future(log_signal(
             student['id'], current_subject, current_topic, 'hesitation', 'rephrase_request'
         ))
+
+        # If this is the second or third time they're stuck on the same topic,
+        # inject a "slow down" note into the message for the AI
+        recent_count = await count_recent_hesitations(student['id'], current_subject, current_topic)
+        if recent_count >= 2:
+            message = (
+                f"[STUDENT IS REPEATEDLY CONFUSED ABOUT THIS TOPIC — USE SIMPLER LANGUAGE, "
+                f"SHORTER SENTENCES, A CONCRETE NIGERIAN EXAMPLE, AND CHECK FOR UNDERSTANDING "
+                f"AFTER EACH POINT. DO NOT INTRODUCE NEW CONCEPTS.]\n\n{message}"
+            )
 
     # Call AI brain
     try:
@@ -536,7 +546,7 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
     asyncio.ensure_future(_update_stats(student, phone, conv_state))
 
     if question_data:
-        # AI generated a quiz question — save it to state so next message is evaluated
+        # AI generated a quiz question — save it to state
         new_state = {
             **conv_state,
             'current_question': question_data,
@@ -590,7 +600,6 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
         current_question = conv_state.get('current_question', {})
 
         if not current_question:
-            print("Warning: _evaluate_and_respond called but current_question is empty")
             await _think_and_respond(phone, student, conversation, message, conv_state)
             return
 
@@ -988,4 +997,3 @@ async def _send_diagnostic(phone: str):
         await send_whatsapp_message(phone, msg)
     except Exception as e:
         await send_whatsapp_message(phone, f"Diagnostic error: {str(e)[:200]}")
-
