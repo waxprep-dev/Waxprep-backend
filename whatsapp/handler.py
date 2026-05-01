@@ -212,17 +212,11 @@ async def route_message(phone: str, name: str, message: str,
     if message_type in ['voice', 'audio']:
         await _handle_voice(phone, student, conversation, media_id, conv_state)
         return
-    # 7. Check if student is answering a pending quiz question
-    from ai.classifier import looks_like_quiz_answer
 
-    current_question = conv_state.get('current_question')
-    if current_question and looks_like_quiz_answer(message):
-        await _evaluate_and_respond(phone, student, conversation, message, conv_state)
-        return
-
+    # 6. Hard-coded trigger check & Clear pending quiz if command is used
     if conv_state.get('current_question') and classify_hard_trigger(message, conv_state):
-    conv_state['current_question'] = None                         
-    # 6. Hard-coded trigger check
+        conv_state['current_question'] = None
+
     trigger = classify_hard_trigger(message, conv_state)
 
     if trigger == 'ONBOARDING':
@@ -297,7 +291,19 @@ async def route_message(phone: str, name: str, message: str,
         await _confirm_cancel(phone, student, conversation, message, conv_state)
         return
 
-    
+    if trigger == 'PROGRESS':
+        from database.students import get_student_profile_summary
+        summary = await get_student_profile_summary(student)
+        await send_whatsapp_message(phone, summary)
+        return
+
+    # 7. Check if student is answering a pending quiz question (after command checks)
+    from ai.classifier import looks_like_quiz_answer
+    current_question = conv_state.get('current_question')
+    if current_question and looks_like_quiz_answer(message):
+        await _evaluate_and_respond(phone, student, conversation, message, conv_state)
+        return
+
     # 8. Everything else goes to the AI brain
     await _think_and_respond(phone, student, conversation, message, conv_state)
 
@@ -557,13 +563,6 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
 
 async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
                                   message: str, conv_state: dict) -> None:
-    """
-    Student answered a quiz question.
-
-    This is the function that was causing "sorry something went wrong."
-    The fix: full try/except wrapping, better state extraction,
-    explicit fallback if anything goes wrong.
-    """
     from whatsapp.sender import send_whatsapp_message
     from database.conversations import (
         update_conversation_state, save_message, get_conversation_history
@@ -582,12 +581,10 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
         current_question = conv_state.get('current_question', {})
 
         if not current_question:
-            # No question in state — treat as normal message
             print("Warning: _evaluate_and_respond called but current_question is empty")
             await _think_and_respond(phone, student, conversation, message, conv_state)
             return
 
-        # Extract question fields — handle both AI format (short keys) and DB format (long keys)
         q_text = current_question.get('question', current_question.get('question_text', ''))
         opt_a = current_question.get('a', current_question.get('option_a', ''))
         opt_b = current_question.get('b', current_question.get('option_b', ''))
@@ -599,7 +596,6 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
         topic = current_question.get('topic', conversation.get('current_topic', ''))
         difficulty = current_question.get('difficulty_level', 5)
 
-        # Extract the letter the student answered
         student_letter = extract_answer_letter(message)
 
         if not student_letter:
@@ -612,27 +608,10 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
         correct_answer = correct_answer.strip().upper()
         is_correct = student_letter == correct_answer
 
-        # Build the question object for the evaluator
-        question_for_eval = {
-            'question_text': q_text,
-            'option_a': opt_a,
-            'option_b': opt_b,
-            'option_c': opt_c,
-            'option_d': opt_d,
-            'correct_answer': correct_answer,
-            'explanation_correct': explanation,
-            'explanation_a': current_question.get('explanation_a', ''),
-            'explanation_b': current_question.get('explanation_b', ''),
-            'explanation_c': current_question.get('explanation_c', ''),
-            'explanation_d': current_question.get('explanation_d', ''),
-        }
-
-        # Update mastery and Elo in background (non-blocking)
         asyncio.ensure_future(record_interaction_outcome(
             student['id'], subject, topic, difficulty, is_correct
         ))
 
-        # Update correct count
         if is_correct:
             try:
                 supabase.table('students').update({
@@ -641,35 +620,29 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
             except Exception as e:
                 print(f"Correct count update error: {e}")
 
-        # Award points
         points, _ = await calculate_and_award_points(
             student_id=student['id'],
             is_correct=is_correct,
             question_difficulty=difficulty
         )
 
-        # Check milestone badges
         new_total = student.get('total_questions_answered', 0) + 1
         badges = await check_and_award_milestone_badges(student['id'], new_total)
 
-        # Get context and history for AI response
         history_task = asyncio.ensure_future(get_conversation_history(conversation['id']))
         context_task = asyncio.ensure_future(get_full_student_context(student))
         history, context = await asyncio.gather(history_task, context_task)
 
-        # Build what the student actually answered (with option text)
         option_map = {'A': opt_a, 'B': opt_b, 'C': opt_c, 'D': opt_d}
         student_answer_with_text = f"{student_letter}. {option_map.get(student_letter, message)}"
         correct_with_text = f"{correct_answer}. {option_map.get(correct_answer, '')}"
 
-        # Extra context about points and badges to weave in naturally
         extra_note = f"\n\n(The student earned {points} points for this answer."
         if badges:
             badge_names = ', '.join([b.get('name', '') for b in badges])
             extra_note += f" They also just earned a new badge: {badge_names}."
         extra_note += " Mention points and badge naturally only if it fits the flow — do not force it.)"
 
-        # Build quiz context for the AI
         quiz_ctx = {
             'question': q_text,
             'student_answer': student_answer_with_text,
@@ -680,7 +653,6 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
             'topic': topic,
         }
 
-        # Let Wax write the natural evaluation response
         response_text, new_question_data = await think(
             message=message + extra_note,
             student=student,
@@ -703,7 +675,6 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
         session_q = conv_state.get('session_questions', 0) + 1
         session_correct = conv_state.get('session_correct', 0) + (1 if is_correct else 0)
 
-        # If Wax generated another question, save it — otherwise clear
         if new_question_data:
             new_state = {
                 **conv_state,
@@ -738,7 +709,6 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
         asyncio.ensure_future(increment_questions_today(student['id']))
         asyncio.ensure_future(_update_stats(student, phone, conv_state))
 
-        # Send badge notifications separately so they do not interrupt the answer flow
         if badges:
             await asyncio.sleep(1.5)
             for badge in badges:
@@ -755,12 +725,7 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
                     pass
 
     except Exception as e:
-        # This is the catch that prevents "sorry something went wrong"
         print(f"Error in _evaluate_and_respond: {e}")
-        import traceback
-        traceback.print_exc()
-
-        # Clear the broken question state and continue naturally
         try:
             name = student.get('name', 'Student').split()[0]
             broken_state = {**conv_state, 'current_question': None}
@@ -768,19 +733,9 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
                 conversation['id'], 'whatsapp', phone,
                 {'conversation_state': broken_state}
             )
-            # Fall back to natural AI response instead of crashing
             await _think_and_respond(phone, student, conversation, message, broken_state)
-        except Exception as e2:
-            print(f"Double error in _evaluate_and_respond fallback: {e2}")
-            try:
-                name = student.get('name', 'Student').split()[0]
-                from whatsapp.sender import send_whatsapp_message
-                await send_whatsapp_message(
-                    phone,
-                    f"I had a small glitch there, {name}. Your answer was received. Ask me anything to continue."
-                )
-            except Exception:
-                pass
+        except Exception:
+            pass
 
 
 async def _handle_image(phone: str, student: dict, media_id: str, caption: str):
@@ -868,9 +823,6 @@ async def _handle_voice(phone: str, student: dict, conversation: dict,
         )
         return
 
-    print(f"Voice transcribed for {name}: {transcribed_text[:100]}")
-
-    # Treat transcribed text as a normal message
     await _think_and_respond(
         phone=phone,
         student=student,
@@ -988,7 +940,6 @@ async def _check_level(student_id: str, phone: str, student_name: str):
 
 
 async def _send_diagnostic(phone: str):
-    """Admin-only diagnostic command: $DIAG"""
     from whatsapp.sender import send_whatsapp_message
     from database.client import supabase, redis_client
     from helpers import nigeria_now
@@ -997,9 +948,7 @@ async def _send_diagnostic(phone: str):
     try:
         now = nigeria_now()
         today = now.strftime('%Y-%m-%d')
-
-        db_ok = False
-        redis_ok = False
+        db_ok, redis_ok = False, False
 
         try:
             supabase.table('system_config').select('config_key').limit(1).execute()
@@ -1015,7 +964,6 @@ async def _send_diagnostic(phone: str):
 
         ai_cost_raw = redis_client.get(f"ai_cost:{today}")
         ai_cost = float(ai_cost_raw) if ai_cost_raw else 0.0
-
         total_students = supabase.table('students').select('id', count='exact').execute()
 
         msg = (
@@ -1028,9 +976,6 @@ async def _send_diagnostic(phone: str):
             f"Free Model: {settings.GROQ_FREE_MODEL}\n"
             f"Scholar Model: {settings.GROQ_SMART_MODEL}\n"
         )
-
         await send_whatsapp_message(phone, msg)
-
     except Exception as e:
-        from whatsapp.sender import send_whatsapp_message
         await send_whatsapp_message(phone, f"Diagnostic error: {str(e)[:200]}")
