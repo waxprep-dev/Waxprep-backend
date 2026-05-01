@@ -118,6 +118,8 @@ async def process_telegram_update(update: dict) -> None:
         await tg_onboarding_response(chat_id, conversation, text)
         return
 
+    if conv_state.get('current_question') and classify_hard_trigger(text, conv_state):
+    conv_state['current_question'] = None
     trigger = classify_hard_trigger(text, conv_state)
 
     # --- Subscription flow ---
