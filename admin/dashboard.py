@@ -1,7 +1,7 @@
 """
 Admin Dashboard — WhatsApp Command Interface
 FIXED: Removed duplicate function definitions
-ADDED: Student name search, bug report viewing, suggestion viewing
+ADDED: Student name search, bug report viewing, suggestion viewing, ALOC Question Import
 """
 import asyncio
 from config.settings import settings
@@ -81,6 +81,11 @@ async def handle_admin_command(phone: str, message: str):
         await admin_manage_codes(phone, rest.strip())
     elif command == 'QUESTIONS':
         await admin_questions(phone, sub_command, rest)
+    elif command == 'IMPORT_QUESTIONS':
+        from features.aloc_importer import import_questions_from_aloc
+        await send_whatsapp_message(phone, "Importing past questions from ALOC... This may take a few minutes.")
+        result = await import_questions_from_aloc()
+        await send_whatsapp_message(phone, result)
     elif command == 'REPORT':
         from utils.scheduler import send_daily_admin_report
         await send_whatsapp_message(phone, "Generating report now...")
@@ -158,7 +163,8 @@ async def send_admin_help(phone: str):
 
         "Content:\n"
         "ADMIN QUESTIONS PENDING\n"
-        "ADMIN QUESTIONS APPROVE [ID]\n\n"
+        "ADMIN QUESTIONS APPROVE [ID]\n"
+        "ADMIN IMPORT_QUESTIONS — Import from ALOC\n\n"
 
         "Mode Switch:\n"
         "ADMIN STUDENT_MODE — Test as student\n"
