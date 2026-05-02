@@ -277,8 +277,9 @@ async def migrate_temp_to_real(
         if not raw:
             return None
         temp = json.loads(raw)
-        # Delete the temp key
+        # Delete the temp key from Redis
         redis_client.delete(_temp_key(platform, platform_user_id))
+        
         # Create real conversation using the state from temp
         from database.client import supabase
         now = nigeria_now()
@@ -293,6 +294,10 @@ async def migrate_temp_to_real(
             'session_started_at': now.isoformat(),
             'last_message_at': now.isoformat(),
         }).execute()
+        
+        # Clear the cache so the next get_or_create_conversation picks up the real record
+        invalidate_conversation(platform, platform_user_id)
+        
         return result.data[0] if result.data else None
     except Exception as e:
         print(f"migrate_temp_to_real error: {e}")
