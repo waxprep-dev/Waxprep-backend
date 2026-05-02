@@ -758,7 +758,7 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
                 {'conversation_state': new_state, 'last_message_at': nigeria_now().isoformat()}
             )
 
-        asyncio.ensure_future(increment_questions_today(student['id']))
+        bg_task(increment_questions_today(student['id']))
         asyncio.ensure_future(_update_stats(student, phone, conv_state))
 
         if badges:
