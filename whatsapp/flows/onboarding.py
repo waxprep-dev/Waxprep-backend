@@ -1,4 +1,5 @@
 import re
+from datetime import datetime
 
 EXAM_SUBJECTS = {
     'JAMB': [
@@ -144,6 +145,7 @@ async def handle_onboarding_response(phone: str, conversation: dict, message: st
         'target_exam': _step_target_exam,
         'subjects': _step_subjects,
         'exam_date': _step_exam_date,
+        'exam_year_confirm': _step_exam_year_confirm,
         'state': _step_state,
         'language_pref': _step_language_pref,
         'pin_setup': _step_pin_setup,
@@ -261,22 +263,40 @@ async def _step_subjects(phone: str, conversation: dict, message: str, state: di
 async def _step_exam_date(phone: str, conversation: dict, message: str, state: dict):
     from whatsapp.sender import send_whatsapp_message
     from database.conversations import update_conversation_state
-    from datetime import datetime
     from helpers import nigeria_now
     msg = message.strip().lower()
     exam_date = None
     days_left = 180
-    if 'not sure' in msg or 'idk' in msg:
-        years = 2 if 'SS1' in state.get('class_level','') else (1 if 'SS2' in state.get('class_level','') else 0)
-        future_yr = nigeria_now().year + years
-        exam_date = f"{future_yr}-06-15"
-        days_left = (datetime(future_yr, 6, 15) - datetime.now()).days
+    
+    if any(k in msg for k in ['not sure', 'soon', 'this year', 'idk', "don't know", 'unsure', 'no', 'skip']):
+        class_level = state.get('class_level', 'SS3')
+        years_ahead = 2 if 'SS1' in class_level else (1 if 'SS2' in class_level else 0)
+        future_year = nigeria_now().year + years_ahead
+        exam_date = f"{future_year}-06-15"
+        days_left = max(1, (datetime(future_year, 6, 15) - datetime.now()).days)
+
+        await send_whatsapp_message(
+            phone,
+            f"I have pencilled {exam_date[:7]} for your exam — about {days_left} days from now.\n\n"
+            "Is that correct, or are you planning to write next year instead?\n\n"
+            "*1* — This year\n"
+            "*2* — Next year"
+        )
+        await update_conversation_state(conversation['id'], 'whatsapp', phone, {
+            'conversation_state': {
+                **state,
+                'pending_exam_date': exam_date,
+                'pending_days_left': days_left,
+                'pending_future_year': future_year,
+                'awaiting_response_for': 'exam_year_confirm'
+            }
+        })
+        return
+
     else:
-        # Simple extraction
         yr_m = re.search(r'20(2[4-9]|[3-9]\d)', msg)
         if yr_m:
             year = int(yr_m.group(0))
-            # Rough month check for common exam months
             month = 5 if 'may' in msg else (6 if 'jun' in msg else 6)
             exam_dt = datetime(year, month, 15)
             now_dt = datetime.now()
@@ -291,8 +311,33 @@ async def _step_exam_date(phone: str, conversation: dict, message: str, state: d
     if not exam_date:
         await send_whatsapp_message(phone, "Tell me the month and year (e.g. May 2026).")
         return
+        
     await send_whatsapp_message(phone, f"Got it! {days_left} days left. Which state are you in?")
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {**state, 'exam_date': exam_date, 'days_until_exam': days_left, 'awaiting_response_for': 'state'}})
+
+async def _step_exam_year_confirm(phone: str, conversation: dict, message: str, state: dict):
+    from whatsapp.sender import send_whatsapp_message
+    from database.conversations import update_conversation_state
+    msg = message.strip()
+    
+    if '2' in msg or 'next' in msg.lower():
+        year = state.get('pending_future_year') + 1
+        exam_date = f"{year}-06-15"
+        days_left = (datetime(year, 6, 15) - datetime.now()).days
+    else:
+        exam_date = state.get('pending_exam_date')
+        days_left = state.get('pending_days_left')
+        
+    await send_whatsapp_message(phone, f"Got it! {days_left} days left. Which state are you in?")
+    await update_conversation_state(conversation['id'], 'whatsapp', phone, {
+        'conversation_state': {
+            **state,
+            'exam_date': exam_date,
+            'days_until_exam': days_left,
+            'awaiting_response_for': 'state',
+            'pending_exam_date': None, 'pending_days_left': None, 'pending_future_year': None
+        }
+    })
 
 async def _step_state(phone: str, conversation: dict, message: str, state: dict):
     from whatsapp.sender import send_whatsapp_message
