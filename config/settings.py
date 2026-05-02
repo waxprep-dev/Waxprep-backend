@@ -44,6 +44,7 @@ class Settings:
     WHATSAPP_API_VERSION = "v19.0"
     WHATSAPP_API_URL = "https://graph.facebook.com/v19.0"
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    ALOC_API_TOKEN = os.getenv("ALOC_API_TOKEN")
 
     # Paystack
     PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_SECRET_KEY")
