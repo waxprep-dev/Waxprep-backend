@@ -105,7 +105,7 @@ async def process_telegram_update(update: dict) -> None:
         )
         return
 
-    # ----- Admin commands Admin commands ------------------------------------------------
+    # ----- Admin commands ------------------------------------------------
     from admin.dashboard import is_admin, handle_admin_command
     msg_upper = text.strip().upper() if text else ''
 
@@ -263,12 +263,12 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
     # ---- Race condition guard ----
     from database.conversations import acquire_student_lock, release_student_lock
     from telegram.sender import send_telegram_message
-    
+
     locked = await acquire_student_lock(student['id'])
     if not locked:
         await send_telegram_message(chat_id, "I'm still processing your last message. One moment.")
         return
-        
+
     try:
         from database.conversations import (get_conversation_history, update_conversation_state,
                                             save_message)
@@ -282,14 +282,14 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
             await send_telegram_message(chat_id, limit_msg)
             return
 
-        # ---- Long‑pause re‑entry (Fix 6) ----
+        # ---- Long‑pause re‑entry ----
         from datetime import datetime, timedelta
         last_ts = conversation.get('last_message_at')
         if last_ts:
             try:
                 last_dt = datetime.fromisoformat(str(last_ts).replace('Z', '+00:00'))
                 now_nig = nigeria_now()
-                gap = (now_nig - last_dt.replace(tzinfo=now_nig.tzinfo) 
+                gap = (now_nig - last_dt.replace(tzinfo=now_nig.tzinfo)
                        if last_dt.tzinfo is None else now_nig - last_dt)
                 if gap > timedelta(hours=1):
                     current_subject = conversation.get('current_subject', 'General Studies')
@@ -300,7 +300,6 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
                         f"Ready to keep going?"
                     )
                     await send_telegram_message(chat_id, warm_greeting)
-                    # Update state immediately to prevent re-triggering this session
                     await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
                         'last_message_at': now_nig.isoformat()
                     })
@@ -319,7 +318,7 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
 
         asyncio.ensure_future(save_message(conversation['id'], student['id'], 'telegram', 'user', message))
 
-        # Silent diagnosis: detect hesitation and log signal
+        # Silent diagnosis: hesitation detection
         from features.silent_diagnosis import detect_hesitation, log_signal, count_recent_hesitations
         if detect_hesitation(message):
             current_subject = conversation.get('current_subject', 'general')
@@ -327,7 +326,6 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
             asyncio.ensure_future(log_signal(
                 student['id'], current_subject, current_topic, 'hesitation', 'rephrase_request'
             ))
-
             recent_count = await count_recent_hesitations(student['id'], current_subject, current_topic)
             if recent_count >= 2:
                 message = (
@@ -362,6 +360,10 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
         asyncio.ensure_future(increment_questions_today(student['id']))
 
         if question_data:
+            from features.recent_questions import add_recent_question
+            add_recent_question(student['id'], question_data.get('question', ''))
+
+        if question_data:
             new_state = {**conv_state, 'current_question': question_data, 'session_date': today}
             subject = question_data.get('subject', recent_subject or '')
             topic = question_data.get('topic', '')
@@ -389,7 +391,7 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
                 if pending and pending.get('question') == question_data.get('question'):
                     correct = pending.get('correct', pending.get('correct_answer', '?'))
                     await send_telegram_message(
-                        chat_id, 
+                        chat_id,
                         f"⏰ Time's up! The correct answer was *{correct}*. No worries — you can review it and we'll keep going. Want an explanation or the next question?"
                     )
                     await ucs(conv_id, 'telegram', str(chat_id), {
@@ -497,6 +499,10 @@ async def _evaluate_and_respond_telegram(chat_id: int, student: dict, conversati
 
     asyncio.ensure_future(save_message(conversation['id'], student['id'], 'telegram', 'user', message))
     asyncio.ensure_future(save_message(conversation['id'], student['id'], 'telegram', 'assistant', response_text))
+
+    if new_question_data:
+        from features.recent_questions import add_recent_question
+        add_recent_question(student['id'], new_question_data.get('question', ''))
 
     today = nigeria_today()
     session_q = conv_state.get('session_questions', 0) + 1
