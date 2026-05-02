@@ -36,6 +36,7 @@ async def import_questions_from_aloc() -> str:
     for subject in SUBJECTS:
         for year in YEAR_RANGE:
             try:
+                # Use the /m endpoint which returns up to 40 questions
                 url = f"{ALOC_BASE_URL}/m?subject={subject}&year={year}&type=utme"
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     response = await client.get(url, headers=headers)
@@ -44,7 +45,20 @@ async def import_questions_from_aloc() -> str:
                         continue
 
                     data = response.json()
-                    questions = data.get("questions", []) or data.get("data", [])
+                    # ALOC wraps questions differently. They may come as a list under "data"
+                    # or as individual objects. We handle both.
+                    questions = []
+                    if isinstance(data.get("data"), list):
+                        questions = data["data"]
+                    elif isinstance(data.get("data"), dict):
+                        questions = [data["data"]]
+                    elif isinstance(data.get("questions"), list):
+                        questions = data["questions"]
+                    else:
+                        # Single question returned
+                        if data.get("question"):
+                            questions = [data]
+
                     if not questions:
                         continue
 
@@ -52,13 +66,20 @@ async def import_questions_from_aloc() -> str:
                         try:
                             question_text = q.get("question", "")
                             options = q.get("option", {})
-                            option_a = options.get("a", "")
-                            option_b = options.get("b", "")
-                            option_c = options.get("c", "")
-                            option_d = options.get("d", "")
-                            correct = q.get("answer", "").lower()
+                            if isinstance(options, list):
+                                # Some responses might use array format
+                                option_a = options[0] if len(options) > 0 else ""
+                                option_b = options[1] if len(options) > 1 else ""
+                                option_c = options[2] if len(options) > 2 else ""
+                                option_d = options[3] if len(options) > 3 else ""
+                            else:
+                                option_a = options.get("a", "")
+                                option_b = options.get("b", "")
+                                option_c = options.get("c", "")
+                                option_d = options.get("d", "")
+                            correct = q.get("answer", "").lower().strip()
                             explanation = q.get("explanation", "")
-                            exam_type = "JAMB"  # default to JAMB for utme type
+                            exam_type = "JAMB"  # default for UTME type
                             exam_year = year
 
                             # Skip if any critical field is missing
@@ -76,7 +97,7 @@ async def import_questions_from_aloc() -> str:
                             supabase.table("questions").insert({
                                 "exam_type": exam_type,
                                 "subject": subject,
-                                "topic": "General",  # will be refined later
+                                "topic": "General",
                                 "year": exam_year,
                                 "question_text": question_text,
                                 "option_a": option_a,
