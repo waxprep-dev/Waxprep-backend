@@ -582,7 +582,9 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
             from features.recent_questions import add_recent_question
             add_recent_question(student['id'], question_data.get('question', ''))
 
-        asyncio.ensure_future(_update_stats(student, phone, conv_state))
+        # === REPLACED LINE ===
+        bg_task(_update_stats(student, phone, conv_state))
+        # =====================
 
         if question_data:
             new_state = {
