@@ -121,7 +121,6 @@ CRISIS_RESPONSE = (
     "• Nigeria Suicide Prevention Hotline: 09090002999\n"
     "• Lagos Mental Health Helpline: 09090002999\n"
     "• Mentally Aware Nigeria Initiative: 08091116264\n\n"
-64\n\n"
     "If you're in immediate danger, please call 112 or go to the nearest hospital.\n\n"
     "I'm here to talk, but I'm not a replacement for professional support. You matter, and things can get better."
 )
@@ -449,9 +448,6 @@ async def _confirm_cancel(phone: str, student: dict, conversation: dict,
         name = student.get('name', 'Student').split()[0]
         await send_whatsapp_message(
             phone,
-Student').split()Student').split()[0]
-        await send_whatsapp_message(
-            phone,
             f"Cancellation noted, {name} (ID: {student.get('wax_id')}). Your plan access continues until it expires.\n\n"
             "Your progress, WAX ID, and streak are all kept. "
             "Come back anytime — type *SUBSCRIBE* to reactivate."
@@ -528,9 +524,11 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
         context = await get_full_student_context(student)
         recent_subject = conversation.get('current_subject')
 
-        asyncio.ensure_future(save_message(
+        # === REPLACED LINE ===
+        bg_task(save_message(
             conversation['id'], student['id'], 'whatsapp', 'user', message
         ))
+        # =====================
 
         # Silent diagnosis: hesitation detection
         from features.silent_diagnosis import detect_hesitation, log_signal, count_recent_hesitations
