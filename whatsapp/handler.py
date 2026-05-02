@@ -156,7 +156,7 @@ async def route_message(phone: str, name: str, message: str,
             pass
         return
 
-    # 1. Admin commands
+    # 1. 1. Admin commands
     if is_admin(phone) and msg_upper.startswith('ADMIN '):
         await handle_admin_command(phone, message)
         return
@@ -565,9 +565,12 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
 
         await send_whatsapp_message(phone, response_text)
 
-        asyncio.ensure_future(save_message(
+        # === REPLACED LINE ===
+        bg_task(save_message(
             conversation['id'], student['id'], 'whatsapp', 'assistant', response_text
         ))
+        # =====================
+
         asyncio.ensure_future(increment_questions_today(student['id']))
 
         if question_data:
