@@ -383,6 +383,11 @@ async def _step_pin_confirm(phone: str, conversation: dict, message: str, state:
     try:
         student = await create_student(phone=phone, name=state.get('name'), pin=state.get('pending_pin'), class_level=state.get('class_level'), target_exam=state.get('target_exam'), subjects=state.get('subjects', []), exam_date=state.get('exam_date'), state=state.get('student_state'), language_preference=state.get('language_pref'))
         await link_platform_to_student(student['id'], 'whatsapp', phone)
+
+        # Convert the temp session to a real conversation record
+        from database.conversations import migrate_temp_to_real
+        await migrate_temp_to_real('whatsapp', phone, student['id'])
+
         await update_conversation_state(conversation['id'], 'whatsapp', phone, {'student_id': student['id'], 'current_mode': 'default', 'conversation_state': {}})
         fire_and_forget(notify_admin_new_student(student, phone))
         
