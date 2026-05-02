@@ -524,22 +524,18 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
         context = await get_full_student_context(student)
         recent_subject = conversation.get('current_subject')
 
-        # === REPLACED LINE ===
         bg_task(save_message(
             conversation['id'], student['id'], 'whatsapp', 'user', message
         ))
-        # =====================
 
         # Silent diagnosis: hesitation detection
         from features.silent_diagnosis import detect_hesitation, log_signal, count_recent_hesitations
         if detect_hesitation(message):
             current_subject = conversation.get('current_subject', 'general')
             current_topic = conversation.get('current_topic', 'general')
-            # === REPLACED LINE ===
             bg_task(log_signal(
                 student['id'], current_subject, current_topic, 'hesitation', 'rephrase_request'
             ))
-            # =====================
             recent_count = await count_recent_hesitations(student['id'], current_subject, current_topic)
             if recent_count >= 2:
                 message = (
@@ -567,24 +563,18 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
 
         await send_whatsapp_message(phone, response_text)
 
-        # === REPLACED LINE ===
         bg_task(save_message(
             conversation['id'], student['id'], 'whatsapp', 'assistant', response_text
         ))
-        # =====================
 
-        # === REPLACED LINE ===
         bg_task(increment_questions_today(student['id']))
-        # =====================
 
         if question_data:
             # Log the question to prevent repetition
             from features.recent_questions import add_recent_question
             add_recent_question(student['id'], question_data.get('question', ''))
 
-        # === REPLACED LINE ===
         bg_task(_update_stats(student, phone, conv_state))
-        # =====================
 
         if question_data:
             new_state = {
@@ -667,7 +657,7 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
         correct_answer = correct_answer.strip().upper()
         is_correct = student_letter == correct_answer
 
-        asyncio.ensure_future(record_interaction_outcome(
+        bg_task(record_interaction_outcome(
             student['id'], subject, topic, difficulty, is_correct
         ))
 
