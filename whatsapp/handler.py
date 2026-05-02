@@ -77,7 +77,7 @@ async def process_single_message(message_data: dict, value: dict) -> None:
 
     try:
         if message_id:
-            asyncio.ensure_future(_mark_read(message_id))
+            bg_task(_mark_read(message_id))
 
         await route_message(
             phone=phone,
