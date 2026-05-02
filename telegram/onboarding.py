@@ -1,10 +1,5 @@
-"""
-Telegram-specific onboarding flow.
-Uses send_telegram_message instead of WhatsApp sender.
-All steps are identical to the WhatsApp onboarding, just adapted for Telegram.
-"""
-
 import re
+from datetime import datetime
 from telegram.sender import send_telegram_message
 from database.conversations import update_conversation_state
 from config.settings import settings
@@ -67,8 +62,9 @@ async def handle_onboarding_response(chat_id: int, conversation: dict, message: 
         'new_or_existing': _step_new_or_existing, 'terms_acceptance': _step_terms_acceptance,
         'wax_id_entry': _step_wax_id_entry, 'pin_entry': _step_pin_entry,
         'name': _step_name, 'class_level': _step_class_level, 'target_exam': _step_target_exam,
-        'subjects': _step_subjects, 'exam_date': _step_exam_date, 'state': _step_state,
-        'language_pref': _step_language_pref, 'pin_setup': _step_pin_setup, 'pin_confirm': _step_pin_confirm,
+        'subjects': _step_subjects, 'exam_date': _step_exam_date, 'exam_year_confirm': _step_exam_year_confirm,
+        'state': _step_state, 'language_pref': _step_language_pref, 
+        'pin_setup': _step_pin_setup, 'pin_confirm': _step_pin_confirm,
     }
     handler = handlers.get(awaiting)
     if handler: await handler(chat_id, conversation, message, state)
@@ -214,10 +210,35 @@ async def _step_subjects(chat_id, conversation, message, state):
 
 
 async def _step_exam_date(chat_id, conversation, message, state):
-    from datetime import datetime
     from helpers import nigeria_now
     msg = message.strip().lower()
     exam_date = None; days_left = 180
+    
+    if any(k in msg for k in ['not sure', 'soon', 'this year', 'idk', "don't know", 'unsure', 'no', 'skip']):
+        class_level = state.get('class_level', 'SS3')
+        years_ahead = 2 if 'SS1' in class_level else (1 if 'SS2' in class_level else 0)
+        future_year = nigeria_now().year + years_ahead
+        exam_date = f"{future_year}-06-15"
+        days_left = max(1, (datetime(future_year, 6, 15) - datetime.now()).days)
+
+        await send_telegram_message(
+            chat_id,
+            f"I have pencilled {exam_date[:7]} for your exam — about {days_left} days from now.\n\n"
+            "Is that correct, or are you planning to write next year instead?\n\n"
+            "*1* — This year\n"
+            "*2* — Next year"
+        )
+        await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
+            'conversation_state': {
+                **state,
+                'pending_exam_date': exam_date,
+                'pending_days_left': days_left,
+                'pending_future_year': future_year,
+                'awaiting_response_for': 'exam_year_confirm'
+            }
+        })
+        return
+
     months = {'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6, 'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12, 'january': 1, 'february': 2, 'march': 3, 'april': 4, 'june': 6, 'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12}
     year_match = re.search(r'20(2[4-9]|[3-9]\d)', msg)
     year = int(year_match.group(0)) if year_match else None
@@ -231,18 +252,34 @@ async def _step_exam_date(chat_id, conversation, message, state):
             return
         exam_date = f"{year}-{month:02d}-15"
         days_left = max(1, (exam_dt - now_dt).days)
-    elif msg in ['not sure', 'soon', 'this year', 'idk', "don't know", 'unsure', 'no', 'skip']:
-        class_level = state.get('class_level', 'SS3')
-        if 'SS1' in class_level: years_ahead = 2
-        elif 'SS2' in class_level: years_ahead = 1
-        else: years_ahead = 0
-        future_year = nigeria_now().year + years_ahead
-        exam_date = f"{future_year}-06-15"; days_left = max(1, (datetime(future_year, 6, 15) - datetime.now()).days)
     
     if not exam_date: await send_telegram_message(chat_id, "When is your exam?\n\nTry:\n- May 2026\n- June 2026\n- Not sure"); return
+    
     urgency = f"\n\nOnly {days_left} days left! We need to move fast." if days_left < 30 else f"\n\n{days_left} days. Enough time if we stay focused." if days_left < 90 else f"\n\n{days_left} days — plenty of time if we start now and stay consistent."
     await send_telegram_message(chat_id, f"Got it!{urgency}\n\nWhich state are you in?\n\n_(e.g. Lagos, Abuja, Kano, Rivers)_")
     await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {'conversation_state': {**state, 'exam_date': exam_date, 'days_until_exam': days_left, 'awaiting_response_for': 'state'}})
+
+
+async def _step_exam_year_confirm(chat_id, conversation, message, state):
+    msg = message.strip()
+    if '2' in msg or 'next' in msg.lower():
+        year = state.get('pending_future_year') + 1
+        exam_date = f"{year}-06-15"
+        days_left = (datetime(year, 6, 15) - datetime.now()).days
+    else:
+        exam_date = state.get('pending_exam_date')
+        days_left = state.get('pending_days_left')
+        
+    await send_telegram_message(chat_id, f"Got it! {days_left} days left. Which state are you in?\n\n_(e.g. Lagos, Abuja, Kano, Rivers)_")
+    await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
+        'conversation_state': {
+            **state,
+            'exam_date': exam_date,
+            'days_until_exam': days_left,
+            'awaiting_response_for': 'state',
+            'pending_exam_date': None, 'pending_days_left': None, 'pending_future_year': None
+        }
+    })
 
 
 async def _step_state(chat_id, conversation, message, state):
