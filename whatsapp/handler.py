@@ -11,6 +11,7 @@ import asyncio
 import re
 from config.settings import settings
 from helpers import nigeria_today, nigeria_now, get_time_of_day, sanitize_input
+from utils.background import bg_task
 
 
 def _get_state(conversation: dict) -> dict:
