@@ -657,6 +657,12 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
         correct_answer = correct_answer.strip().upper()
         is_correct = student_letter == correct_answer
 
+        # Increment total questions answered via Database RPC
+        try:
+            supabase.rpc('increment_questions_answered', {'student_id_param': student['id']}).execute()
+        except Exception as e:
+            print(f"total_questions_answered update error: {e}")
+
         bg_task(record_interaction_outcome(
             student['id'], subject, topic, difficulty, is_correct
         ))
