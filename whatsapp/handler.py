@@ -891,11 +891,6 @@ async def _update_stats(student: dict, phone: str, conv_state: dict) -> None:
     from zoneinfo import ZoneInfo
 
     try:
-        bg_task(supabase.rpc('increment_questions_answered', {'student_id_param': student['id']}).execute())
-    except Exception as e:
-        print(f"total_questions_answered update error: {e}")
-
-    try:
         today = nigeria_today()
         yesterday = (
             datetime.now(ZoneInfo("Africa/Lagos")) - timedelta(days=1)
