@@ -266,7 +266,8 @@ async def _step_exam_year_confirm(chat_id: int, conversation: dict, message: str
     days_left = state.get('pending_days_left', 180)
     future_year = state.get('pending_future_year', 2026)
 
-    if msg in ['2', 'next', 'next year', 'defer']:
+    # FIX: Added 'next year' in msg check for flexibility
+    if msg in ['2', 'next', 'next year', 'defer'] or 'next year' in msg:
         # Student is writing next year — recalculate
         future_year += 1
         exam_date = f"{future_year}-06-15"
@@ -364,4 +365,3 @@ async def _step_pin_confirm(chat_id, conversation, message, state):
         await send_telegram_message(chat_id, welcome)
     except Exception as e:
         await send_telegram_message(chat_id, f"Error creating account. Send *HI* to retry. Ref: {str(e)[:50]}")
-7
