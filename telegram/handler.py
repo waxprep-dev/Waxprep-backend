@@ -105,7 +105,7 @@ async def process_telegram_update(update: dict) -> None:
         )
         return
 
-    # ----- Admin commands ------------------------------------------------
+    # ----- Admin commands Admin commands ------------------------------------------------
     from admin.dashboard import is_admin, handle_admin_command
     msg_upper = text.strip().upper() if text else ''
 
@@ -190,6 +190,11 @@ async def process_telegram_update(update: dict) -> None:
 
     if trigger == 'PING':
         await send_telegram_message(chat_id, f"Pong! I'm here and ready, {student.get('name', 'Student').split()[0]}.")
+        return
+
+    if trigger == 'VERIFY PAYMENT' or trigger == 'I HAVE PAID':
+        from features.payment_verifier import handle_verify_payment
+        await handle_verify_payment(str(chat_id), student, 'telegram')
         return
 
     if trigger == 'PROGRESS':
