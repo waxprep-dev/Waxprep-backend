@@ -67,7 +67,8 @@ async def send_telegram_message(chat_id: int, text: str, reply_markup: dict = No
                 # If Markdown parsing failed, retry without formatting
                 error_data = response.json()
                 if response.status_code == 400 and "parse" in str(error_data).lower():
-                    payload["parse_mode"] = None
+                    # FIX: Remove the key entirely instead of setting to None
+                    payload.pop("parse_mode", None)
                     retry = await client.post(url, json=payload)
                     if retry.status_code != 200:
                         print(f"Telegram send error (plain): {retry.text[:200]}")
