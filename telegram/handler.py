@@ -526,7 +526,7 @@ async def _evaluate_and_respond_telegram(chat_id: int, student: dict, conversati
             'last_message_at': nigeria_now().isoformat()
         })
 
-    asyncio.ensure_future(increment_questions_today(student['id']))
+    bg_task(increment_questions_today(student['id']))
 
     if badges:
         await asyncio.sleep(1.5)
