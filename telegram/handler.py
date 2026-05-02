@@ -324,7 +324,7 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
         if detect_hesitation(message):
             current_subject = conversation.get('current_subject', 'general')
             current_topic = conversation.get('current_topic', 'general')
-            asyncio.ensure_future(log_signal(
+            bg_task(log_signal(
                 student['id'], current_subject, current_topic, 'hesitation', 'rephrase_request'
             ))
             recent_count = await count_recent_hesitations(student['id'], current_subject, current_topic)
