@@ -86,6 +86,22 @@ async def handle_admin_command(phone: str, message: str):
         await send_whatsapp_message(phone, "Importing past questions from ALOC... This may take a few minutes.")
         result = await import_questions_from_aloc()
         await send_whatsapp_message(phone, result)
+    elif command == 'TEST_ALOC':
+        from whatsapp.sender import send_whatsapp_message
+        import httpx
+        # Using the token provided directly for this debug phase
+        token = "ALOC-e07704e53978b4066e73"
+        url = "https://questions.aloc.com.ng/api/v2/q?subject=chemistry"
+        # Using AccessToken as requested by their 400 error response
+        headers = {"AccessToken": token}
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(url, headers=headers)
+                status = resp.status_code
+                body = resp.text[:300]
+            await send_whatsapp_message(phone, f"ALOC Test Result\nStatus: {status}\nResponse: {body}")
+        except Exception as e:
+            await send_whatsapp_message(phone, f"ALOC test error: {str(e)[:200]}")
     elif command == 'REPORT':
         from utils.scheduler import send_daily_admin_report
         await send_whatsapp_message(phone, "Generating report now...")
@@ -164,7 +180,8 @@ async def send_admin_help(phone: str):
         "Content:\n"
         "ADMIN QUESTIONS PENDING\n"
         "ADMIN QUESTIONS APPROVE [ID]\n"
-        "ADMIN IMPORT_QUESTIONS — Import from ALOC\n\n"
+        "ADMIN IMPORT_QUESTIONS — Import from ALOC\n"
+        "ADMIN TEST_ALOC — Debug ALOC Token\n\n"
 
         "Mode Switch:\n"
         "ADMIN STUDENT_MODE — Test as student\n"
