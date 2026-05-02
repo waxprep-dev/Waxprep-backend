@@ -759,7 +759,7 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
             )
 
         bg_task(increment_questions_today(student['id']))
-        asyncio.ensure_future(_update_stats(student, phone, conv_state))
+        bg_task(_update_stats(student, phone, conv_state))
 
         if badges:
             await asyncio.sleep(1.5)
