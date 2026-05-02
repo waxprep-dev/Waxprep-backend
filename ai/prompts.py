@@ -29,13 +29,6 @@ def get_wax_system_prompt(student: dict, recent_subject: str = None,
     level = student.get('current_level', 1)
     level_name = student.get('level_name', 'Freshman')
 
-    # Determine effective plan label — only used internally, never stated to student unless they ask
-    if is_trial:
-        effective_plan = 'trial'
-    else:
-        effective_plan = tier
-
-    # FIX 2: Ensure CURRENT FOCUS is clearly stated
     active_subject = f"\nCURRENT FOCUS: {recent_subject}" if recent_subject else ""
 
     pidgin_instruction = ""
@@ -48,20 +41,24 @@ def get_wax_system_prompt(student: dict, recent_subject: str = None,
 
     context_section = f"\n\nSTUDENT LEARNING CONTEXT:\n{context_str}" if context_str else ""
 
-    # Model quality note for self-awareness
     model_note = ""
     if ai_model and 'llama-3.1-8b' in ai_model:
         model_note = "\nNOTE: You are running on the standard model. Give your absolute best. Depth and accuracy still matter."
 
-    # Inject recently asked questions to avoid repetition
+    # Fetch recently asked questions to avoid repetition
     recent_questions_block = ""
     student_id_val = student.get('id', '')
     if student_id_val:
-        from features.recent_questions import get_recent_questions
-        recent_qs = get_recent_questions(student_id_val)
-        if recent_qs:
-            recent_questions_block = "\nRECENTLY ASKED QUESTIONS (do NOT repeat any of these):\n" + \
-                "\n".join(f"- {q}" for q in recent_qs)
+        try:
+            from features.recent_questions import get_recent_questions
+            recent_qs = get_recent_questions(student_id_val)
+            if recent_qs:
+                recent_questions_block = (
+                    "\n\nRECENTLY ASKED QUESTIONS (do NOT repeat any of these):\n" +
+                    "\n".join(f"- {q}" for q in recent_qs)
+                )
+        except Exception:
+            pass
 
     return f"""You are Wax — {name}'s personal AI teacher inside WaxPrep.
 
