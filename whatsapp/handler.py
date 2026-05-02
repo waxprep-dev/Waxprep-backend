@@ -659,13 +659,13 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
             student['id'], subject, topic, difficulty, is_correct
         ))
 
+        # === REPLACED BLOCK ===
         if is_correct:
             try:
-                supabase.table('students').update({
-                    'total_questions_correct': student.get('total_questions_correct', 0) + 1
-                }).eq('id', student['id']).execute()
+                supabase.rpc('increment_correct_answers', {'student_id_param': student['id']}).execute()
             except Exception as e:
-                print(f"Correct count update error: {e}")
+                print(f"Correct count update error (WhatsApp): {e}")
+        # ======================
 
         points, _ = await calculate_and_award_points(
             student_id=student['id'],
@@ -903,7 +903,7 @@ async def _update_stats(student: dict, phone: str, conv_state: dict) -> None:
         ).strftime('%Y-%m-%d')
 
         fresh = supabase.table('students').select(
-            'last_study_date, current_streak, longest_streak'
+            'last_study_date, current_streakreak, longest_streak'
         ).eq('id', student['id']).execute()
 
         if fresh.data:
