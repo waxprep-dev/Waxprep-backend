@@ -499,7 +499,7 @@ async def _evaluate_and_respond_telegram(chat_id: int, student: dict, conversati
     await send_telegram_message(chat_id, response_text, reply_markup=keyboard)
 
     bg_task(save_message(conversation['id'], student['id'], 'telegram', 'user', message))
-    asyncio.ensure_future(save_message(conversation['id'], student['id'], 'telegram', 'assistant', response_text))
+    bg_task(save_message(conversation['id'], student['id'], 'telegram', 'assistant', response_text))
 
     if new_question_data:
         from features.recent_questions import add_recent_question
