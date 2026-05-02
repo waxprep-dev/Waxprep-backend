@@ -12,6 +12,7 @@ import re
 HARD_COMMANDS = {
     'SUBSCRIBE', 'MYID', 'MY ID', 'PAYG', 'BILLING', 'MYPLAN', 'MY PLAN',
     'CANCEL', 'PING', 'SUBSCRIBE MONTHLY', 'SUBSCRIBE YEARLY', 'TEST',
+    'VERIFY PAYMENT', 'I HAVE PAID',
 }
 
 # Promo code triggers
