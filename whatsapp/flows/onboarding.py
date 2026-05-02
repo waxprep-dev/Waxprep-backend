@@ -323,7 +323,8 @@ async def _step_exam_year_confirm(phone: str, conversation: dict, message: str, 
     days_left = state.get('pending_days_left', 180)
     future_year = state.get('pending_future_year', 2026)
 
-    if msg in ['2', 'next', 'next year', 'defer']:
+    # FIX: Added 'next year' in msg check for flexibility
+    if msg in ['2', 'next', 'next year', 'defer'] or 'next year' in msg:
         future_year += 1
         exam_date = f"{future_year}-06-15"
         days_left = max(1, (datetime(future_year, 6, 15) - datetime.now()).days)
