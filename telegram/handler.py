@@ -357,7 +357,7 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
 
         await send_telegram_message(chat_id, response_text, reply_markup=keyboard)
 
-        asyncio.ensure_future(save_message(conversation['id'], student['id'], 'telegram', 'assistant', response_text))
+        bg_task(save_message(conversation['id'], student['id'], 'telegram', 'assistant', response_text))
         asyncio.ensure_future(increment_questions_today(student['id']))
 
         if question_data:
