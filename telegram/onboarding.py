@@ -260,25 +260,32 @@ async def _step_exam_date(chat_id, conversation, message, state):
     await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {'conversation_state': {**state, 'exam_date': exam_date, 'days_until_exam': days_left, 'awaiting_response_for': 'state'}})
 
 
-async def _step_exam_year_confirm(chat_id, conversation, message, state):
-    msg = message.strip()
-    if '2' in msg or 'next' in msg.lower():
-        year = state.get('pending_future_year') + 1
-        exam_date = f"{year}-06-15"
-        days_left = (datetime(year, 6, 15) - datetime.now()).days
+async def _step_exam_year_confirm(chat_id: int, conversation: dict, message: str, state: dict):
+    msg = message.strip().lower()
+    exam_date = state.get('pending_exam_date', '')
+    days_left = state.get('pending_days_left', 180)
+    future_year = state.get('pending_future_year', 2026)
+
+    if msg in ['2', 'next', 'next year', 'defer']:
+        # Student is writing next year — recalculate
+        future_year += 1
+        exam_date = f"{future_year}-06-15"
+        days_left = max(1, (datetime(future_year, 6, 15) - datetime.now()).days)
+
+    # Either way, continue to the state question
+    if days_left < 30:
+        urgency = f"\n\nOnly {days_left} days left! We need to move fast."
+    elif days_left < 90:
+        urgency = f"\n\n{days_left} days. Enough time if we stay focused."
     else:
-        exam_date = state.get('pending_exam_date')
-        days_left = state.get('pending_days_left')
-        
-    await send_telegram_message(chat_id, f"Got it! {days_left} days left. Which state are you in?\n\n_(e.g. Lagos, Abuja, Kano, Rivers)_")
+        urgency = f"\n\n{days_left} days — plenty of time if we start now and stay consistent."
+
+    await send_telegram_message(
+        chat_id,
+        f"Got it!{urgency}\n\nWhich state are you in?\n\n_(e.g. Lagos, Abuja, Kano, Rivers)_"
+    )
     await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
-        'conversation_state': {
-            **state,
-            'exam_date': exam_date,
-            'days_until_exam': days_left,
-            'awaiting_response_for': 'state',
-            'pending_exam_date': None, 'pending_days_left': None, 'pending_future_year': None
-        }
+        'conversation_state': {**state, 'exam_date': exam_date, 'days_until_exam': days_left, 'awaiting_response_for': 'state'}
     })
 
 
