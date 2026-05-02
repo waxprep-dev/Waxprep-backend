@@ -448,7 +448,7 @@ async def _evaluate_and_respond_telegram(chat_id: int, student: dict, conversati
 
     is_correct = student_letter == correct_answer
 
-    asyncio.ensure_future(record_interaction_outcome(student['id'], subject, topic, difficulty, is_correct))
+    bg_task(record_interaction_outcome(student['id'], subject, topic, difficulty, is_correct))
 
     if is_correct:
         from database.client import supabase
