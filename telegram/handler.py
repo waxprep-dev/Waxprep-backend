@@ -428,6 +428,7 @@ async def _evaluate_and_respond_telegram(chat_id: int, student: dict, conversati
     from ai.context_manager import get_full_student_context
     from ai.classifier import extract_answer_letter
     from helpers import nigeria_today
+    from database.client import supabase
 
     current_question = conv_state.get('current_question', {})
     if not current_question:
@@ -448,10 +449,15 @@ async def _evaluate_and_respond_telegram(chat_id: int, student: dict, conversati
 
     is_correct = student_letter == correct_answer
 
+    # Increment total questions answered via RPC
+    try:
+        supabase.rpc('increment_questions_answered', {'student_id_param': student['id']}).execute()
+    except Exception as e:
+        print(f"total_questions_answered update error (Telegram): {e}")
+
     bg_task(record_interaction_outcome(student['id'], subject, topic, difficulty, is_correct))
 
     if is_correct:
-        from database.client import supabase
         try:
             supabase.table('students').update({
                 'total_questions_correct': student.get('total_questions_correct', 0) + 1
