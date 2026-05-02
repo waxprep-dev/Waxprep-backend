@@ -661,13 +661,11 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
             student['id'], subject, topic, difficulty, is_correct
         ))
 
-        # === REPLACED BLOCK ===
         if is_correct:
             try:
-                supabase.rpc('increment_correct_answers', {'student_id_param': student['id']}).execute()
+                bg_task(supabase.rpc('increment_correct_answers', {'student_id_param': student['id']}).execute())
             except Exception as e:
                 print(f"Correct count update error (WhatsApp): {e}")
-        # ======================
 
         points, _ = await calculate_and_award_points(
             student_id=student['id'],
@@ -712,10 +710,10 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
 
         await send_whatsapp_message(phone, response_text)
 
-        asyncio.ensure_future(save_message(
+        bg_task(save_message(
             conversation['id'], student['id'], 'whatsapp', 'user', message
         ))
-        asyncio.ensure_future(save_message(
+        bg_task(save_message(
             conversation['id'], student['id'], 'whatsapp', 'assistant', response_text
         ))
 
@@ -891,12 +889,10 @@ async def _update_stats(student: dict, phone: str, conv_state: dict) -> None:
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
 
-    # === REPLACED BLOCK ===
     try:
-        supabase.rpc('increment_questions_answered', {'student_id_param': student['id']}).execute()
+        bg_task(supabase.rpc('increment_questions_answered', {'student_id_param': student['id']}).execute())
     except Exception as e:
         print(f"total_questions_answered update error: {e}")
-    # ======================
 
     try:
         today = nigeria_today()
