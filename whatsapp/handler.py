@@ -274,7 +274,6 @@ async def route_message(phone: str, name: str, message: str,
         from features.feedback import handle_suggestion
         response = await handle_suggestion(phone, student, message)
         await send_whatsapp_message(phone, response)
-        returnphone, response)
         return
 
     if trigger == 'PING':
@@ -536,9 +535,11 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
         if detect_hesitation(message):
             current_subject = conversation.get('current_subject', 'general')
             current_topic = conversation.get('current_topic', 'general')
-            asyncio.ensure_future(log_signal(
+            # === REPLACED LINE ===
+            bg_task(log_signal(
                 student['id'], current_subject, current_topic, 'hesitation', 'rephrase_request'
             ))
+            # =====================
             recent_count = await count_recent_hesitations(student['id'], current_subject, current_topic)
             if recent_count >= 2:
                 message = (
