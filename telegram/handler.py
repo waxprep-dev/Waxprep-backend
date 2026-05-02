@@ -7,6 +7,7 @@ Includes quiz timer with subject‑based durations.
 import asyncio
 from config.settings import settings
 from helpers import sanitize_input, nigeria_now
+from utils.background import bg_task
 
 # ---------- Subject‑based quiz timer (seconds) ----------
 QUIZ_TIMERS = {
@@ -316,7 +317,7 @@ async def _think_and_respond_telegram(chat_id: int, student: dict, conversation:
         context = await get_full_student_context(student)
         recent_subject = conversation.get('current_subject')
 
-        asyncio.ensure_future(save_message(conversation['id'], student['id'], 'telegram', 'user', message))
+        bg_task(save_message(conversation['id'], student['id'], 'telegram', 'user', message))
 
         # Silent diagnosis: hesitation detection
         from features.silent_diagnosis import detect_hesitation, log_signal, count_recent_hesitations
