@@ -120,6 +120,7 @@ CRISIS_RESPONSE = (
     "• Nigeria Suicide Prevention Hotline: 09090002999\n"
     "• Lagos Mental Health Helpline: 09090002999\n"
     "• Mentally Aware Nigeria Initiative: 08091116264\n\n"
+64\n\n"
     "If you're in immediate danger, please call 112 or go to the nearest hospital.\n\n"
     "I'm here to talk, but I'm not a replacement for professional support. You matter, and things can get better."
 )
@@ -445,6 +446,9 @@ async def _confirm_cancel(phone: str, student: dict, conversation: dict,
             print(f"Cancel log error: {e}")
 
         name = student.get('name', 'Student').split()[0]
+        await send_whatsapp_message(
+            phone,
+Student').split()Student').split()[0]
         await send_whatsapp_message(
             phone,
             f"Cancellation noted, {name} (ID: {student.get('wax_id')}). Your plan access continues until it expires.\n\n"
@@ -889,12 +893,12 @@ async def _update_stats(student: dict, phone: str, conv_state: dict) -> None:
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
 
+    # === REPLACED BLOCK ===
     try:
-        supabase.table('students').update({
-            'total_questions_answered': student.get('total_questions_answered', 0) + 1
-        }).eq('id', student['id']).execute()
+        supabase.rpc('increment_questions_answered', {'student_id_param': student['id']}).execute()
     except Exception as e:
         print(f"total_questions_answered update error: {e}")
+    # ======================
 
     try:
         today = nigeria_today()
@@ -903,7 +907,7 @@ async def _update_stats(student: dict, phone: str, conv_state: dict) -> None:
         ).strftime('%Y-%m-%d')
 
         fresh = supabase.table('students').select(
-            'last_study_date, current_streakreak, longest_streak'
+            'last_study_date, current_streak, longest_streak'
         ).eq('id', student['id']).execute()
 
         if fresh.data:
