@@ -931,7 +931,7 @@ async def _update_stats(student: dict, phone: str, conv_state: dict) -> None:
                 supabase.table('students').update(updates).eq('id', student['id']).execute()
 
             streak_milestones = {3, 7, 14, 30, 60, 100}
-            if new_streak in streak_milestones and last_date != today:
+            if new_streak in streak_milestones and last_date != today and last_date != yesterday:
                 try:
                     from features.badges import check_streak_badges
                     from whatsapp.sender import send_whatsapp_message
