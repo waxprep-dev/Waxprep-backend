@@ -713,6 +713,7 @@ async def _evaluate_and_respond(phone: str, student: dict, conversation: dict,
         bg_task(save_message(
             conversation['id'], student['id'], 'whatsapp', 'user', message
         ))
+        
         bg_task(save_message(
             conversation['id'], student['id'], 'whatsapp', 'assistant', response_text
         ))
