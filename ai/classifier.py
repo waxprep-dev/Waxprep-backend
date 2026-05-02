@@ -22,7 +22,8 @@ PROMO_TRIGGERS = {'PROMO', 'CODE'}
 ONBOARDING_STATES = {
     'new_or_existing', 'terms_acceptance', 'wax_id_entry', 'pin_entry',
     'name', 'class_level', 'target_exam', 'subjects', 'exam_date',
-    'state', 'language_pref', 'pin_setup', 'pin_confirm'
+    'state', 'language_pref', 'pin_setup', 'pin_confirm',
+    'exam_year_confirm',
 }
 
 
