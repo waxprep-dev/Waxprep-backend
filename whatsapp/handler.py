@@ -156,7 +156,7 @@ async def route_message(phone: str, name: str, message: str,
             pass
         return
 
-    # 1. 1. Admin commands
+    # 1. Admin commands
     if is_admin(phone) and msg_upper.startswith('ADMIN '):
         await handle_admin_command(phone, message)
         return
@@ -274,6 +274,7 @@ async def route_message(phone: str, name: str, message: str,
         from features.feedback import handle_suggestion
         response = await handle_suggestion(phone, student, message)
         await send_whatsapp_message(phone, response)
+        returnphone, response)
         return
 
     if trigger == 'PING':
@@ -571,7 +572,9 @@ async def _think_and_respond(phone: str, student: dict, conversation: dict,
         ))
         # =====================
 
-        asyncio.ensure_future(increment_questions_today(student['id']))
+        # === REPLACED LINE ===
+        bg_task(increment_questions_today(student['id']))
+        # =====================
 
         if question_data:
             # Log the question to prevent repetition
