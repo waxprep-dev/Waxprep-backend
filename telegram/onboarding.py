@@ -327,12 +327,20 @@ async def _step_pin_confirm(chat_id, conversation, message, state):
         student = await create_student(phone=f"telegram:{chat_id}", name=state.get('name', 'Student'), pin=pending_pin, class_level=state.get('class_level'), target_exam=state.get('target_exam'), subjects=state.get('subjects', []), exam_date=state.get('exam_date'), state=state.get('student_state'), language_preference=state.get('language_pref', 'english'))
         await link_platform_to_student(student['id'], 'telegram', str(chat_id))
         
-        # Convert the temp session to a real conversation record
-        from database.conversations import migrate_temp_to_real
+        # Convert the temp session to a real DB conversation and replace the conversation object
+        from database.conversations import get_or_create_conversation, migrate_temp_to_real
         await migrate_temp_to_real('telegram', str(chat_id), student['id'])
+        conversation = await get_or_create_conversation(
+            student_id=student['id'],
+            platform='telegram',
+            platform_user_id=str(chat_id)
+        )
         
-        update_state_task = update_conversation_state(conversation['id'], 'telegram', str(chat_id), {'student_id': student['id'], 'current_mode': 'default', 'conversation_state': {}})
-        fire_and_forget(update_state_task)
+        await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
+            'student_id': student['id'], 
+            'current_mode': 'default', 
+            'conversation_state': {}
+        })
         
         fire_and_forget(notify_admin_new_student(student, f"telegram:{chat_id}"))
         name_first = student['name'].split()[0]; days_left = state.get('days_until_exam', 180)
@@ -356,3 +364,4 @@ async def _step_pin_confirm(chat_id, conversation, message, state):
         await send_telegram_message(chat_id, welcome)
     except Exception as e:
         await send_telegram_message(chat_id, f"Error creating account. Send *HI* to retry. Ref: {str(e)[:50]}")
+7
