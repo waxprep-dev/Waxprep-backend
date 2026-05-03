@@ -1,24 +1,14 @@
 import re
 import json
+import random
 from datetime import datetime
 from whatsapp.sender import send_whatsapp_message
 from database.conversations import update_conversation_state
 from config.settings import settings
-from constants import EXAM_SUBJECTS, CLASS_LEVELS, NIGERIAN_STATES, SUBJECT_INTROS, get_welcome_intro
+from constants import EXAM_SUBJECTS, CLASS_LEVELS, NIGERIAN_STATES, SUBJECT_INTROS, get_welcome_intro, WELCOME_VARIANTS
 
 async def handle_new_or_existing(phone: str, conversation: dict, message: str):
-    welcome = (
-        "Hey there! 👋\n\n"
-        "I'm Wax — your study buddy. I help Nigerian students "
-        "understand their schoolwork, prepare for exams, and "
-        "feel more confident in class.\n\n"
-        "No matter what class you're in or what you're studying, "
-        "I'm here for you.\n\n"
-        "Let's get to know each other a little. "
-        "Are you new here, or do you already have a WAX ID?\n\n"
-        "*1* — I'm new, create my account\n"
-        "*2* — I have a WAX ID, log me in"
-    )
+    welcome = random.choice(WELCOME_VARIANTS)
     await send_whatsapp_message(phone, welcome)
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {'awaiting_response_for': 'new_or_existing'}})
 
