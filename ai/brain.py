@@ -111,10 +111,15 @@ async def think(
     else:
         messages.append({"role": "user", "content": message})
 
-    # Try to pull a real past question before falling back to AI generation
+    # ── Real past‑question injection ────────────────────────────────
+    # If the student is asking for a quiz, check our Supabase bank first.
+    # When a real question is found, we return only a short intro line;
+    # the handler will add the tappable buttons and the timer automatically.
     if not quiz_context and any(kw in message.lower() for kw in ['quiz', 'test me', 'question']):
         detected_subject = None
-        for subject in ['english', 'mathematics', 'physics', 'chemistry', 'biology', 'economics', 'government', 'literature', 'geography', 'commerce', 'agriculture']:
+        for subject in ['english', 'mathematics', 'physics', 'chemistry',
+                         'biology', 'economics', 'government', 'literature',
+                         'geography', 'commerce', 'agriculture']:
             if subject in message.lower():
                 detected_subject = subject
                 break
@@ -122,15 +127,9 @@ async def think(
             from features.question_bank import get_real_question
             real_q = await get_real_question(detected_subject)
             if real_q:
-                # Format the response directly and return
-                response = (
-                    f"Here's a real JAMB {detected_subject.capitalize()} question:\n\n"
-                    f"{real_q['question']}\n\n"
-                    f"A) {real_q['a']}\n"
-                    f"B) {real_q['b']}\n"
-                    f"C) {real_q['c']}\n"
-                    f"D) {real_q['d']}"
-                )
+                # Only return a short intro — no options in the text.
+                # The handler will attach the keyboard and timer.
+                response = f"Here's a real JAMB {detected_subject.capitalize()} question:"
                 return response, real_q
 
     # Try primary model (based on tier)
