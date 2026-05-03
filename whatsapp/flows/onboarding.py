@@ -8,9 +8,13 @@ from constants import EXAM_SUBJECTS, CLASS_LEVELS, NIGERIAN_STATES, SUBJECT_INTR
 
 async def handle_new_or_existing(phone: str, conversation: dict, message: str):
     welcome = (
-        "Welcome to WaxPrep!\n\n"
-        "Nigeria's smartest AI study companion. I'm Wax, your personal tutor "
-        "for JAMB, WAEC, NECO, Post-UTME, and more.\n\n"
+        "Hey there! 👋\n\n"
+        "I'm Wax — your study buddy. I help Nigerian students "
+        "understand their schoolwork, prepare for exams, and "
+        "feel more confident in class.\n\n"
+        "No matter what class you're in or what you're studying, "
+        "I'm here for you.\n\n"
+        "Let's get to know each other a little. "
         "Are you new here, or do you already have a WAX ID?\n\n"
         "*1* — I'm new, create my account\n"
         "*2* — I have a WAX ID, log me in"
