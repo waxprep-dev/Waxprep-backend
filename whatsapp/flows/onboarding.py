@@ -1,121 +1,12 @@
 import re
+import json
 from datetime import datetime
-
-EXAM_SUBJECTS = {
-    'JAMB': [
-        'English Language', 'Mathematics', 'Physics', 'Chemistry', 'Biology',
-        'Economics', 'Government', 'Literature in English', 'Geography',
-        'Commerce', 'Agricultural Science', 'Christian Religious Studies',
-        'Islamic Religious Studies', 'History', 'Yoruba', 'Igbo', 'Hausa'
-    ],
-    'WAEC': [
-        'English Language', 'Mathematics', 'Physics', 'Chemistry', 'Biology',
-        'Economics', 'Government', 'Literature in English', 'Geography',
-        'Commerce', 'Agricultural Science', 'Further Mathematics',
-        'Food and Nutrition', 'Computer Studies', 'Technical Drawing'
-    ],
-    'NECO': [
-        'English Language', 'Mathematics', 'Physics', 'Chemistry', 'Biology',
-        'Economics', 'Government', 'Literature in English', 'Geography',
-        'Commerce', 'Agricultural Science'
-    ],
-    'COMMON_ENTRANCE': [
-        'English Language', 'Mathematics', 'Basic Science',
-        'Social Studies', 'Verbal Reasoning', 'Quantitative Reasoning'
-    ],
-    'POST_UTME': [
-        'English Language', 'Mathematics', 'Physics', 'Chemistry',
-        'Biology', 'Economics', 'Government'
-    ],
-}
-
-CLASS_LEVELS = ['JSS1', 'JSS2', 'JSS3', 'SS1', 'SS2', 'SS3']
-
-NIGERIAN_STATES = [
-    'Abia', 'Adamawa', 'Akwa Ibom', 'Anambra', 'Bauchi', 'Bayelsa', 'Benue',
-    'Borno', 'Cross River', 'Delta', 'Ebonyi', 'Edo', 'Ekiti', 'Enugu', 'FCT',
-    'Gombe', 'Imo', 'Jigawa', 'Kaduna', 'Kano', 'Katsina', 'Kebbi', 'Kogi',
-    'Kwara', 'Lagos', 'Nasarawa', 'Niger', 'Ogun', 'Ondo', 'Osun', 'Oyo',
-    'Plateau', 'Rivers', 'Sokoto', 'Taraba', 'Yobe', 'Zamfara'
-]
-
-SUBJECT_INTROS = {
-    ('physics', 'chemistry', 'biology'): (
-        "There's one concept that controls all three sciences: **Energy.** "
-        "It's the same energy that powers a generator (Physics), makes bread "
-        "rise with yeast (Biology), and burns kerosene in a lamp (Chemistry). "
-        "Understand this one thing, and you've already gained ground in three "
-        "subjects at once. It'll take 2 minutes. Ready?"
-    ),
-    ('physics', 'chemistry'): (
-        "There's one idea that connects both your science subjects: **Matter.** "
-        "Everything around you — the air, the water, your phone — is made of "
-        "atoms. Physics tells you how they move. Chemistry tells you how they "
-        "react. Master this link and both subjects become easier. 2 minutes. Ready?"
-    ),
-    ('physics', 'biology'): (
-        "Here's a connection most students miss: **Force and Motion** appear "
-        "in both Physics and Biology. Blood flowing through your body follows "
-        "the same principles as water through a pipe. An okada turning a corner "
-        "is the same physics as your heartbeat. See the link? 2 minutes. Ready?"
-    ),
-    ('chemistry', 'biology'): (
-        "Both your sciences meet at **Chemical Reactions.** Digestion is chemistry "
-        "inside your body. Fermentation is chemistry inside a palm wine gourd. "
-        "Rust on a roof is chemistry in the open air. Same principles, different "
-        "scenes. 2 minutes to connect them. Ready?"
-    ),
-    ('government', 'economics', 'commerce'): (
-        "Your three subjects share one big idea: **Systems.** Government sets "
-        "the rules. Economics tracks the money. Commerce moves the goods. "
-        "Understand how they feed each other, and you understand how Nigeria "
-        "works. 2 minutes. Ready?"
-    ),
-    ('government', 'literature', 'economics'): (
-        "Your three subjects tell one big story: **Power, Money, and Meaning.** "
-        "Government shows who makes the rules. Economics shows who pays for them. "
-        "Literature shows who tells the story. Understand how these three connect, "
-        "and you understand how societies rise and fall. 2 minutes. Ready?"
-    ),
-    ('government', 'literature'): (
-        "Both your subjects explore **Power.** Who holds it in a government? "
-        "Who holds it in a story? From the Constitution to Chinua Achebe, the "
-        "same struggle plays out: who gets to decide, and who pays the price. "
-        "2 minutes. Ready?"
-    ),
-    ('economics', 'commerce', 'geography'): (
-        "Your subjects revolve around **Resources.** Where they come from "
-        "(Geography), how they're traded (Commerce), and who profits (Economics). "
-        "Oil from the Delta, cocoa from Ondo, markets from Onitsha — it's all "
-        "connected. 2 minutes. Ready?"
-    ),
-    ('english', 'literature', 'christian religious studies'): (
-        "Your subjects share one thread: **Narrative.** The Bible tells stories "
-        "of faith. Achebe tells stories of change. Your English exam tests how "
-        "well you understand both. Stories shape beliefs — let me show you how. "
-        "2 minutes. Ready?"
-    ),
-    ('mathematics', 'physics', 'chemistry'): (
-        "Your three subjects speak one language: **Equations.** Maths gives you "
-        "the grammar. Physics and Chemistry give you the sentences. Once you "
-        "see equations as a language instead of a punishment, everything shifts. "
-        "2 minutes. Ready?"
-    ),
-}
-
-def get_welcome_intro(subjects: list) -> str:
-    if not subjects:
-        return "Let's start with the basics and build from there. Ready?"
-    subject_lower = [s.lower().strip() for s in subjects]
-    for combo, intro in SUBJECT_INTROS.items():
-        if all(c in subject_lower for c in combo):
-            return intro
-    first = subjects[0] if subjects else 'your subject'
-    return f"Let's start with {first} — that's a strong choice. We'll build your foundation step by step. Ready?"
+from whatsapp.sender import send_whatsapp_message
+from database.conversations import update_conversation_state
+from config.settings import settings
+from constants import EXAM_SUBJECTS, CLASS_LEVELS, NIGERIAN_STATES, SUBJECT_INTROS, get_welcome_intro
 
 async def handle_new_or_existing(phone: str, conversation: dict, message: str):
-    from whatsapp.sender import send_whatsapp_message
-    from database.conversations import update_conversation_state
     welcome = (
         "Welcome to WaxPrep!\n\n"
         "Nigeria's smartest AI study companion. I'm Wax, your personal tutor "
@@ -128,7 +19,6 @@ async def handle_new_or_existing(phone: str, conversation: dict, message: str):
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {'awaiting_response_for': 'new_or_existing'}})
 
 async def handle_onboarding_response(phone: str, conversation: dict, message: str):
-    import json
     raw_state = conversation.get('conversation_state', {})
     if isinstance(raw_state, str):
         try: state = json.loads(raw_state)
@@ -156,9 +46,6 @@ async def handle_onboarding_response(phone: str, conversation: dict, message: st
     else: await handle_new_or_existing(phone, conversation, message)
 
 async def _step_new_or_existing(phone: str, conversation: dict, message: str, state: dict):
-    from whatsapp.sender import send_whatsapp_message
-    from database.conversations import update_conversation_state
-    from config.settings import settings
     msg = message.strip().lower()
     if any(k in msg for k in ['1', 'new', 'create', 'register']):
         await send_whatsapp_message(phone, f"Before we set up your account, please accept our Terms of Service.\n\nBy using WaxPrep, you agree to:\n\nUse the platform only for your own study\nKeep your WAX ID and PIN private\nAllow WaxPrep to use your study data to personalize your experience\n\nFull Terms: {settings.TERMS_URL}\n\nType *YES* to accept.")
@@ -170,8 +57,6 @@ async def _step_new_or_existing(phone: str, conversation: dict, message: str, st
         await send_whatsapp_message(phone, "Please reply with *1* (New) or *2* (Existing).")
 
 async def _step_terms_acceptance(phone: str, conversation: dict, message: str, state: dict):
-    from whatsapp.sender import send_whatsapp_message
-    from database.conversations import update_conversation_state
     msg = message.strip().lower()
     if msg in ['yes', 'y', 'agree', 'accept', 'ok', '1']:
         await send_whatsapp_message(phone, "Thank you! What is your full name?")
@@ -180,8 +65,6 @@ async def _step_terms_acceptance(phone: str, conversation: dict, message: str, s
         await send_whatsapp_message(phone, "Type *YES* to accept and continue.")
 
 async def _step_wax_id_entry(phone: str, conversation: dict, message: str, state: dict):
-    from whatsapp.sender import send_whatsapp_message
-    from database.conversations import update_conversation_state
     from features.wax_id import get_student_by_wax_id
     from helpers import extract_wax_id
     wax_id = extract_wax_id(message)
@@ -193,8 +76,6 @@ async def _step_wax_id_entry(phone: str, conversation: dict, message: str, state
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {'awaiting_response_for': 'pin_entry', 'pending_wax_id': wax_id}})
 
 async def _step_pin_entry(phone: str, conversation: dict, message: str, state: dict):
-    from whatsapp.sender import send_whatsapp_message
-    from database.conversations import update_conversation_state
     from features.wax_id import get_student_by_wax_id, link_platform_to_student
     from helpers import verify_pin
     student = await get_student_by_wax_id(state.get('pending_wax_id'))
@@ -206,8 +87,6 @@ async def _step_pin_entry(phone: str, conversation: dict, message: str, state: d
     await send_whatsapp_message(phone, f"Welcome back, *{student['name'].split()[0]}*! What would you like to study?")
 
 async def _step_name(phone: str, conversation: dict, message: str, state: dict):
-    from whatsapp.sender import send_whatsapp_message
-    from database.conversations import update_conversation_state
     from helpers import clean_name
     name = clean_name(message)
     if len(name) < 2:
@@ -218,8 +97,6 @@ async def _step_name(phone: str, conversation: dict, message: str, state: dict):
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {**state, 'name': name, 'awaiting_response_for': 'class_level'}})
 
 async def _step_class_level(phone: str, conversation: dict, message: str, state: dict):
-    from whatsapp.sender import send_whatsapp_message
-    from database.conversations import update_conversation_state
     msg = message.strip().upper()
     number_map = {str(i + 1): lvl for i, lvl in enumerate(CLASS_LEVELS)}
     class_level = number_map.get(msg) or (msg if msg in CLASS_LEVELS else None)
@@ -230,8 +107,6 @@ async def _step_class_level(phone: str, conversation: dict, message: str, state:
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {**state, 'class_level': class_level, 'awaiting_response_for': 'target_exam'}})
 
 async def _step_target_exam(phone: str, conversation: dict, message: str, state: dict):
-    from whatsapp.sender import send_whatsapp_message
-    from database.conversations import update_conversation_state
     msg = message.strip().upper()
     exam_map = {'1':'JAMB','2':'WAEC','3':'NECO','4':'COMMON_ENTRANCE','5':'POST_UTME'}
     target_exams = [exam_map[k] for k in exam_map if k in msg]
@@ -248,8 +123,6 @@ async def _step_target_exam(phone: str, conversation: dict, message: str, state:
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {**state, 'target_exam': 'Multiple' if is_multi else target_exams[0], 'target_exams': target_exams, 'available_subjects': available, 'awaiting_response_for': 'subjects'}})
 
 async def _step_subjects(phone: str, conversation: dict, message: str, state: dict):
-    from whatsapp.sender import send_whatsapp_message
-    from database.conversations import update_conversation_state
     available = state.get('available_subjects', [])
     numbers = re.findall(r'\d+', message)
     selected = [available[int(n)-1] for n in numbers if 1 <= int(n) <= len(available)]
@@ -261,8 +134,6 @@ async def _step_subjects(phone: str, conversation: dict, message: str, state: di
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {**state, 'subjects': selected, 'awaiting_response_for': 'exam_date'}})
 
 async def _step_exam_date(phone: str, conversation: dict, message: str, state: dict):
-    from whatsapp.sender import send_whatsapp_message
-    from database.conversations import update_conversation_state
     from helpers import nigeria_now
     msg = message.strip().lower()
     exam_date = None
@@ -316,14 +187,11 @@ async def _step_exam_date(phone: str, conversation: dict, message: str, state: d
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {**state, 'exam_date': exam_date, 'days_until_exam': days_left, 'awaiting_response_for': 'state'}})
 
 async def _step_exam_year_confirm(phone: str, conversation: dict, message: str, state: dict):
-    from whatsapp.sender import send_whatsapp_message
-    from database.conversations import update_conversation_state
     msg = message.strip().lower()
     exam_date = state.get('pending_exam_date', '')
     days_left = state.get('pending_days_left', 180)
     future_year = state.get('pending_future_year', 2026)
 
-    # FIX: Added 'next year' in msg check for flexibility
     if msg in ['2', 'next', 'next year', 'defer'] or 'next year' in msg:
         future_year += 1
         exam_date = f"{future_year}-06-15"
@@ -348,22 +216,16 @@ async def _step_exam_year_confirm(phone: str, conversation: dict, message: str, 
     })
 
 async def _step_state(phone: str, conversation: dict, message: str, state: dict):
-    from whatsapp.sender import send_whatsapp_message
-    from database.conversations import update_conversation_state
     st = message.strip().title()
     await send_whatsapp_message(phone, f"{st}!\nHow should I explain?\n1—Standard English\n2—Pidgin")
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {**state, 'student_state': st, 'awaiting_response_for': 'language_pref'}})
 
 async def _step_language_pref(phone: str, conversation: dict, message: str, state: dict):
-    from whatsapp.sender import send_whatsapp_message
-    from database.conversations import update_conversation_state
     pref = 'pidgin' if '2' in message or 'pidgin' in message.lower() else 'english'
     await send_whatsapp_message(phone, "Set a 4-digit PIN.")
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {**state, 'language_pref': pref, 'awaiting_response_for': 'pin_setup'}})
 
 async def _step_pin_setup(phone: str, conversation: dict, message: str, state: dict):
-    from whatsapp.sender import send_whatsapp_message
-    from database.conversations import update_conversation_state
     pin = message.strip()
     if not pin.isdigit() or len(pin) != 4:
         await send_whatsapp_message(phone, "PIN must be 4 digits.")
@@ -372,8 +234,6 @@ async def _step_pin_setup(phone: str, conversation: dict, message: str, state: d
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {**state, 'pending_pin': pin, 'awaiting_response_for': 'pin_confirm'}})
 
 async def _step_pin_confirm(phone: str, conversation: dict, message: str, state: dict):
-    from whatsapp.sender import send_whatsapp_message
-    from database.conversations import update_conversation_state
     from database.students import create_student
     from features.wax_id import link_platform_to_student
     from features.notifications import notify_admin_new_student, fire_and_forget
@@ -385,7 +245,6 @@ async def _step_pin_confirm(phone: str, conversation: dict, message: str, state:
         student = await create_student(phone=phone, name=state.get('name'), pin=state.get('pending_pin'), class_level=state.get('class_level'), target_exam=state.get('target_exam'), subjects=state.get('subjects', []), exam_date=state.get('exam_date'), state=state.get('student_state'), language_preference=state.get('language_pref'))
         await link_platform_to_student(student['id'], 'whatsapp', phone)
 
-        # Convert the temp session to a real DB conversation and replace the conversation object
         from database.conversations import get_or_create_conversation, migrate_temp_to_real
         await migrate_temp_to_real('whatsapp', phone, student['id'])
         conversation = await get_or_create_conversation(
