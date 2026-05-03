@@ -120,7 +120,7 @@ async def process_telegram_update(update: dict) -> None:
 
     # ----- Hard trigger check -------------------------------------------
     from ai.classifier import classify_hard_trigger, ONBOARDING_STATES
-    from database.conversations import get_or_create_conversation
+    from database.conversations import get_or_create_conversation, update_conversation_state
 
     conversation = await get_or_create_conversation(
         student_id=student['id'],
@@ -140,6 +140,41 @@ async def process_telegram_update(update: dict) -> None:
     if awaiting and awaiting in ONBOARDING_STATES:
         from telegram.onboarding import handle_onboarding_response as tg_onboarding_response
         await tg_onboarding_response(chat_id, conversation, text)
+        return
+
+    # Account deletion PIN confirmation
+    if awaiting == 'delete_confirm_pin':
+        from helpers import verify_pin
+        name = student.get('name', 'Student').split()[0]
+        entered_pin = text.strip()
+        if verify_pin(entered_pin, student['pin_hash']):
+            try:
+                from database.client import supabase
+                from helpers import nigeria_now
+                supabase.table('students').update({
+                    'is_deleted': True,
+                    'deleted_at': nigeria_now().isoformat(),
+                    'is_active': False,
+                }).eq('id', student['id']).execute()
+                await send_telegram_message(
+                    chat_id,
+                    f"Account deleted, {name}.\n\n"
+                    "Your data will be permanently erased in 30 days. "
+                    "If you change your mind, message us within that time.\n\n"
+                    "Thank you for using WaxPrep."
+                )
+            except Exception as e:
+                print(f"Account deletion error (Telegram): {e}")
+                await send_telegram_message(chat_id, "Something went wrong. Please try again.")
+        else:
+            await send_telegram_message(
+                chat_id,
+                f"PIN incorrect, {name}. Account not deleted."
+            )
+        # Clear the state regardless
+        await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
+            'conversation_state': {**conv_state, 'awaiting_response_for': None}
+        })
         return
 
     if conv_state.get('current_question') and classify_hard_trigger(text, conv_state):
@@ -207,6 +242,19 @@ async def process_telegram_update(update: dict) -> None:
     if trigger == 'TEST':
         from features.test_harness import handle_test_command
         await handle_test_command(chat_id, student, conversation, text)
+        return
+
+    if trigger == 'DELETE ACCOUNT':
+        name = student.get('name', 'Student').split()[0]
+        await send_telegram_message(
+            chat_id,
+            f"Are you sure you want to permanently delete your account, {name}?\n\n"
+            "This will erase your WAX ID, all progress, streaks, and badges.\n\n"
+            "Type your *4‑digit PIN* to confirm, or just ignore this message to cancel."
+        )
+        await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
+            'conversation_state': {**conv_state, 'awaiting_response_for': 'delete_confirm_pin'}
+        })
         return
 
     # ----- Quiz answer evaluation ----------------------------------------
@@ -576,3 +624,30 @@ async def _send_diagnostic_telegram(chat_id: int):
            f"Free Model: {settings.GROQ_FREE_MODEL}\n"
            f"Scholar Model: {settings.GROQ_SMART_MODEL}")
     await send_telegram_message(chat_id, msg)
+
+
+async def _handle_callback_query(callback_query: dict):
+    from telegram.sender import send_telegram_message
+    data = callback_query.get('data', '')
+    message = callback_query.get('message', {})
+    chat = message.get('chat', {})
+    chat_id = chat.get('id')
+    if not chat_id or not data:
+        return
+
+    import httpx
+    try:
+        url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+        async with httpx.AsyncClient() as client:
+            await client.post(url, json={"callback_query_id": callback_query['id']})
+    except Exception:
+        pass
+
+    fake_update = {
+        "message": {
+            "chat": {"id": chat_id},
+            "from": message.get('from', {}),
+            "text": data
+        }
+    }
+    await process_telegram_update(fake_update)
