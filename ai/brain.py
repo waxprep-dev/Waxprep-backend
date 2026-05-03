@@ -113,8 +113,7 @@ async def think(
 
     # ── Real past‑question injection ────────────────────────────────
     # If the student is asking for a quiz, check our Supabase bank first.
-    # When a real question is found, we return only a short intro line;
-    # the handler will add the tappable buttons and the timer automatically.
+    # When a real question is found, we return the intro and the question text.
     if not quiz_context and any(kw in message.lower() for kw in ['quiz', 'test me', 'question']):
         detected_subject = None
         for subject in ['english', 'mathematics', 'physics', 'chemistry',
@@ -127,9 +126,11 @@ async def think(
             from features.question_bank import get_real_question
             real_q = await get_real_question(detected_subject)
             if real_q:
-                # Only return a short intro — no options in the text.
-                # The handler will attach the keyboard and timer.
-                response = f"Here's a real JAMB {detected_subject.capitalize()} question:"
+                # Included the question text so the student can see it above the buttons.
+                response = (
+                    f"Here's a real JAMB {detected_subject.capitalize()} question:\n\n"
+                    f"{real_q['question']}"
+                )
                 return response, real_q
 
     # Try primary model (based on tier)
