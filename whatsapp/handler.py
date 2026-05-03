@@ -330,7 +330,7 @@ async def route_message(phone: str, name: str, message: str,
         await _confirm_cancel(phone, student, conversation, message, conv_state)
         return
 
-    if trigger == 'DELETE ACCOUNT':
+    if msg_upper == 'DELETE ACCOUNT':
         name_first = student.get('name', 'Student').split()[0]
         await send_whatsapp_message(
             phone,
