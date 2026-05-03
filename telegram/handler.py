@@ -244,7 +244,7 @@ async def process_telegram_update(update: dict) -> None:
         await handle_test_command(chat_id, student, conversation, text)
         return
 
-    if trigger == 'DELETE ACCOUNT':
+    if msg_upper == 'DELETE ACCOUNT':
         name = student.get('name', 'Student').split()[0]
         await send_telegram_message(
             chat_id,
