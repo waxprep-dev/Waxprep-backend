@@ -5,6 +5,7 @@ Triggered via admin command: ADMIN IMPORT_QUESTIONS
 """
 
 import httpx
+import asyncio
 from config.settings import settings
 
 ALOC_BASE_URL = "https://questions.aloc.com.ng/api/v2"
@@ -19,7 +20,8 @@ SUBJECTS = [
     "commerce", "agriculture", "accounting", "crs", "irs",
 ]
 
-YEAR_RANGE = range(2000, 2023)
+# Only years ALOC actually has questions for
+YEAR_RANGE = range(2000, 2021)
 
 
 async def import_questions_from_aloc() -> str:
@@ -104,5 +106,7 @@ async def import_questions_from_aloc() -> str:
             except Exception as e:
                 errors += 1
                 print(f"ALOC fetch error ({subject} {year}): {e}")
+            
+            await asyncio.sleep(0.5)  # be gentle to ALOC's server
 
     return f"ALOC import complete. {total_inserted} questions added. {errors} errors."
