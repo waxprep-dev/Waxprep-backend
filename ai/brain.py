@@ -111,6 +111,28 @@ async def think(
     else:
         messages.append({"role": "user", "content": message})
 
+    # Try to pull a real past question before falling back to AI generation
+    if not quiz_context and any(kw in message.lower() for kw in ['quiz', 'test me', 'question']):
+        detected_subject = None
+        for subject in ['english', 'mathematics', 'physics', 'chemistry', 'biology', 'economics', 'government', 'literature', 'geography', 'commerce', 'agriculture']:
+            if subject in message.lower():
+                detected_subject = subject
+                break
+        if detected_subject:
+            from features.question_bank import get_real_question
+            real_q = await get_real_question(detected_subject)
+            if real_q:
+                # Format the response directly and return
+                response = (
+                    f"Here's a real JAMB {detected_subject.capitalize()} question:\n\n"
+                    f"{real_q['question']}\n\n"
+                    f"A) {real_q['a']}\n"
+                    f"B) {real_q['b']}\n"
+                    f"C) {real_q['c']}\n"
+                    f"D) {real_q['d']}"
+                )
+                return response, real_q
+
     # Try primary model (based on tier)
     result = await _call_groq(messages, model=ai_model, max_tokens=1200)
     if result:
