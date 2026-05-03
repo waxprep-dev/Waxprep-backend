@@ -238,7 +238,7 @@ async def process_telegram_update(update: dict) -> None:
         return
 
     # If student asks for a quiz while another quiz is pending, remind them
-    if conv_state.get('current_question'):
+    if conv_state.get('current_question') and any(kw in text.lower() for kw in ['quiz', 'test me', 'question me']):
         await send_telegram_message(chat_id, "You still have a question waiting. Answer that one first, then we'll keep going.")
         return
 
