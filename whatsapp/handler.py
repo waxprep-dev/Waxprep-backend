@@ -347,6 +347,11 @@ async def route_message(phone: str, name: str, message: str,
         })
         return
 
+    # If student asks for a quiz while another quiz is pending, remind them
+    if conv_state.get('current_question'):
+        await send_whatsapp_message(phone, "You still have a question waiting. Answer that one first, then we'll keep going.")
+        return
+
     if trigger == 'PROGRESS':
         from database.students import get_student_profile_summary
         summary = await get_student_profile_summary(student)
