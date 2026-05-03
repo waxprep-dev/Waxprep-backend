@@ -103,15 +103,40 @@ async def _step_class_level(phone: str, conversation: dict, message: str, state:
     if not class_level:
         await send_whatsapp_message(phone, f"Choose from: {', '.join(CLASS_LEVELS)}")
         return
+    
+    from constants import JUNIOR_EXAMS, SENIOR_EXAMS
+    is_junior = any(level in class_level.upper() for level in ['JSS'])
+    
+    if is_junior:
+        await send_whatsapp_message(
+            phone,
+            f"{class_level}!\n\n"
+            "Which exam are you preparing for?\n\n"
+            "1 — Common Entrance\n"
+            "2 — BECE (Junior WAEC)\n\n"
+            "_(Reply with the number)_"
+        )
+        await update_conversation_state(conversation['id'], 'whatsapp', phone, {
+            'conversation_state': {**state, 'class_level': class_level, 'awaiting_response_for': 'target_exam'}
+        })
+        return
+
     await send_whatsapp_message(phone, f"{class_level}!\n\nWhich exam?\n1—JAMB\n2—WAEC\n3—NECO\n4—Common Entrance\n5—Post-UTME")
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {**state, 'class_level': class_level, 'awaiting_response_for': 'target_exam'}})
 
 async def _step_target_exam(phone: str, conversation: dict, message: str, state: dict):
     msg = message.strip().upper()
-    exam_map = {'1':'JAMB','2':'WAEC','3':'NECO','4':'COMMON_ENTRANCE','5':'POST_UTME'}
+    class_level = state.get('class_level', 'SS3')
+    is_junior = any(level in class_level.upper() for level in ['JSS'])
+
+    if is_junior:
+        exam_map = {'1': 'COMMON_ENTRANCE', '2': 'BECE'}
+    else:
+        exam_map = {'1':'JAMB','2':'WAEC','3':'NECO','4':'COMMON_ENTRANCE','5':'POST_UTME'}
+        
     target_exams = [exam_map[k] for k in exam_map if k in msg]
     if not target_exams:
-        await send_whatsapp_message(phone, "Choose 1-5.")
+        await send_whatsapp_message(phone, "Choose a valid number.")
         return
     is_multi = len(target_exams) > 1
     available = []
