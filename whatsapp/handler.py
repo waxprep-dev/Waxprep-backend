@@ -136,7 +136,7 @@ async def route_message(phone: str, name: str, message: str,
                          message_type: str = 'text', media_id: str = None) -> None:
     from whatsapp.sender import send_whatsapp_message
     from database.students import get_student_by_phone
-    from database.conversations import get_or_create_conversation
+    from database.conversations import get_or_create_conversation, update_conversation_state
     from admin.dashboard import is_admin, handle_admin_command
     from ai.classifier import classify_hard_trigger, ONBOARDING_STATES
 
@@ -200,6 +200,42 @@ async def route_message(phone: str, name: str, message: str,
     if awaiting in ONBOARDING_STATES:
         from whatsapp.flows.onboarding import handle_onboarding_response
         await handle_onboarding_response(phone, conversation, message)
+        return
+
+    # Account deletion PIN confirmation
+    if awaiting == 'delete_confirm_pin':
+        from helpers import verify_pin
+        name_first = student.get('name', 'Student').split()[0]
+        entered_pin = message.strip()
+        if verify_pin(entered_pin, student['pin_hash']):
+            # Soft-delete the account
+            try:
+                from database.client import supabase
+                from helpers import nigeria_now
+                supabase.table('students').update({
+                    'is_deleted': True,
+                    'deleted_at': nigeria_now().isoformat(),
+                    'is_active': False,
+                }).eq('id', student['id']).execute()
+                await send_whatsapp_message(
+                    phone,
+                    f"Account deleted, {name_first}.\n\n"
+                    "Your data will be permanently erased in 30 days. "
+                    "If you change your mind, message us within that time.\n\n"
+                    "Thank you for using WaxPrep."
+                )
+            except Exception as e:
+                print(f"Account deletion error: {e}")
+                await send_whatsapp_message(phone, "Something went wrong. Please try again.")
+        else:
+            await send_whatsapp_message(
+                phone,
+                f"PIN incorrect, {name_first}. Account not deleted."
+            )
+        # Clear the state regardless
+        await update_conversation_state(conversation['id'], 'whatsapp', phone, {
+            'conversation_state': {**conv_state, 'awaiting_response_for': None}
+        })
         return
 
     # 5. Media handling
@@ -292,6 +328,19 @@ async def route_message(phone: str, name: str, message: str,
 
     if trigger == 'CANCEL_CONFIRM':
         await _confirm_cancel(phone, student, conversation, message, conv_state)
+        return
+
+    if trigger == 'DELETE ACCOUNT':
+        name_first = student.get('name', 'Student').split()[0]
+        await send_whatsapp_message(
+            phone,
+            f"Are you sure you want to permanently delete your account, {name_first}?\n\n"
+            "This will erase your WAX ID, all progress, streaks, and badges.\n\n"
+            "Type your *4‑digit PIN* to confirm, or just ignore this message to cancel."
+        )
+        await update_conversation_state(conversation['id'], 'whatsapp', phone, {
+            'conversation_state': {**conv_state, 'awaiting_response_for': 'delete_confirm_pin'}
+        })
         return
 
     if trigger == 'PROGRESS':
