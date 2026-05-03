@@ -106,6 +106,10 @@ async def process_telegram_update(update: dict) -> None:
         )
         return
 
+    if student.get('is_deleted'):
+        await send_telegram_message(chat_id, "This account has been deleted. Create a new one anytime.")
+        return
+
     # ----- Admin commands ------------------------------------------------
     from admin.dashboard import is_admin, handle_admin_command
     msg_upper = text.strip().upper() if text else ''
