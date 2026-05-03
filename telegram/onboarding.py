@@ -131,17 +131,48 @@ async def _step_class_level(chat_id, conversation, message, state):
         for lvl in CLASS_LEVELS:
             if msg in lvl or lvl in msg: class_level = lvl; break
     if not class_level: await send_telegram_message(chat_id, f"Please choose from: {', '.join(CLASS_LEVELS)}\n\n(Reply with the number 1-6)"); return
+    
+    from constants import JUNIOR_EXAMS, SENIOR_EXAMS
+    is_junior = any(level in class_level.upper() for level in ['JSS'])
+    
+    if is_junior:
+        await send_telegram_message(
+            chat_id,
+            f"{class_level}!\n\n"
+            "Which exam are you preparing for?\n\n"
+            "1 — Common Entrance\n"
+            "2 — BECE (Junior WAEC)\n\n"
+            "_(Reply with the number)_"
+        )
+        await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
+            'conversation_state': {**state, 'class_level': class_level, 'awaiting_response_for': 'target_exam'}
+        })
+        return
+
     await send_telegram_message(chat_id, f"{class_level}!\n\nWhich exam are you preparing for?\n\n1 — JAMB (UTME)\n2 — WAEC (SSCE)\n3 — NECO\n4 — Common Entrance\n5 — Post-UTME\n\n_(Reply with the number)_")
     await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {'conversation_state': {**state, 'class_level': class_level, 'awaiting_response_for': 'target_exam'}})
 
 
 async def _step_target_exam(chat_id, conversation, message, state):
     msg = message.strip().upper()
-    exam_map = {'1': 'JAMB', 'JAMB': 'JAMB', 'UTME': 'JAMB', '2': 'WAEC', 'WAEC': 'WAEC', 'SSCE': 'WAEC', 'GCE': 'WAEC', '3': 'NECO', 'NECO': 'NECO', '4': 'COMMON_ENTRANCE', 'COMMON': 'COMMON_ENTRANCE', '5': 'POST_UTME', 'POST': 'POST_UTME', 'POSTUTME': 'POST_UTME'}
+    class_level = state.get('class_level', 'SS3')
+    is_junior = any(level in class_level.upper() for level in ['JSS'])
+
+    if is_junior:
+        exam_map = {'1': 'COMMON_ENTRANCE', '2': 'BECE'}
+    else:
+        exam_map = {
+            '1': 'JAMB', 'JAMB': 'JAMB', 'UTME': 'JAMB', 
+            '2': 'WAEC', 'WAEC': 'WAEC', 'SSCE': 'WAEC', 'GCE': 'WAEC', 
+            '3': 'NECO', 'NECO': 'NECO', 
+            '4': 'COMMON_ENTRANCE', 'COMMON': 'COMMON_ENTRANCE', 
+            '5': 'POST_UTME', 'POST': 'POST_UTME', 'POSTUTME': 'POST_UTME'
+        }
+        
     target_exams = [v for k, v in exam_map.items() if k in msg]
     target_exam = target_exams[0] if target_exams else None
     is_multi_exam = len(target_exams) > 1
-    if not target_exam: await send_telegram_message(chat_id, "Please reply with 1, 2, 3, 4, or 5 to choose your exam."); return
+    if not target_exam: await send_telegram_message(chat_id, "Please reply with a valid number to choose your exam."); return
     if is_multi_exam:
         available_subjects = []
         for exam in target_exams:
@@ -171,7 +202,7 @@ async def _step_subjects(chat_id, conversation, message, state):
         msg_upper = message.upper()
         for sub in available:
             if sub.upper() in msg_upper and sub not in selected: selected.append(sub)
-    if 'English Language' not in selected and target_exam in ['JAMB', 'WAEC', 'NECO']: selected.insert(0, 'English Language')
+    if 'English Language' not in selected and target_exam in ['JAMB', 'WAEC', 'NECO', 'BECE']: selected.insert(0, 'English Language')
     if len(selected) < 2: await send_telegram_message(chat_id, "Please select at least 2 subjects.\n\nReply with numbers: e.g. 1,2,4,6"); return
     subjects_display = '\n'.join([f"- {s}" for s in selected])
     await send_telegram_message(chat_id, f"Your subjects:\n{subjects_display}\n\nWhen is your exam?\n\n_(e.g. May 2026 or June 2026 or Not sure)_")
