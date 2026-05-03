@@ -3,6 +3,9 @@ Shared constants for WaxPrep onboarding.
 Import this file in both whatsapp/flows/onboarding.py and telegram/onboarding.py.
 """
 
+JUNIOR_EXAMS = ['COMMON_ENTRANCE', 'BECE']
+SENIOR_EXAMS = ['JAMB', 'WAEC', 'NECO', 'POST_UTME']
+
 EXAM_SUBJECTS = {
     'JAMB': [
         'English Language', 'Mathematics', 'Physics', 'Chemistry', 'Biology',
@@ -28,6 +31,13 @@ EXAM_SUBJECTS = {
     'POST_UTME': [
         'English Language', 'Mathematics', 'Physics', 'Chemistry',
         'Biology', 'Economics', 'Government'
+    ],
+    'BECE': [
+        'English Language', 'Mathematics', 'Basic Science',
+        'Social Studies', 'Business Studies', 'Christian Religious Studies',
+        'Islamic Religious Studies', 'Yoruba', 'Igbo', 'Hausa',
+        'Basic Technology', 'Home Economics', 'Agricultural Science',
+        'Physical and Health Education', 'Computer Studies'
     ],
 }
 
