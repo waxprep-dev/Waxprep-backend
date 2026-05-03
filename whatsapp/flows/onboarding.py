@@ -21,6 +21,7 @@ async def handle_onboarding_response(phone: str, conversation: dict, message: st
     awaiting = state.get('awaiting_response_for', '')
     handlers = {
         'new_or_existing': _step_new_or_existing,
+        'student_goal': _step_student_goal,
         'terms_acceptance': _step_terms_acceptance,
         'wax_id_entry': _step_wax_id_entry,
         'pin_entry': _step_pin_entry,
@@ -41,20 +42,64 @@ async def handle_onboarding_response(phone: str, conversation: dict, message: st
 
 async def _step_new_or_existing(phone: str, conversation: dict, message: str, state: dict):
     msg = message.strip().lower()
-    if any(k in msg for k in ['1', 'new', 'create', 'register']):
-        await send_whatsapp_message(phone, f"Before we set up your account, please accept our Terms of Service.\n\nBy using WaxPrep, you agree to:\n\nUse the platform only for your own study\nKeep your WAX ID and PIN private\nAllow WaxPrep to use your study data to personalize your experience\n\nFull Terms: {settings.TERMS_URL}\n\nType *YES* to accept.")
-        await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {'awaiting_response_for': 'terms_acceptance', 'is_new_student': True}})
-    elif any(k in msg for k in ['2', 'existing', 'login', 'have']):
-        await send_whatsapp_message(phone, "Welcome back!\n\nSend your WAX ID to log in.")
-        await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {'awaiting_response_for': 'wax_id_entry'}})
-    else:
-        await send_whatsapp_message(phone, "Please reply with *1* (New) or *2* (Existing).")
+    
+    # Returning student
+    if any(k in msg for k in ['2', 'existing', 'login', 'have']):
+        await send_whatsapp_message(phone,
+            "Before we log you in, please accept our Terms of Service.\n\n"
+            "By using WaxPrep, you agree to use it for your own study, keep your PIN private, "
+            f"and not misuse the platform.\n\nFull Terms: {settings.TERMS_URL}\n\n"
+            "Type *YES* to accept and log in."
+        )
+        await update_conversation_state(conversation['id'], 'whatsapp', phone,
+            {'conversation_state': {'awaiting_response_for': 'terms_acceptance', 'is_new_student': False}}
+        )
+        return
+
+    # New student
+    if any(k in msg for k in ['1', 'new', 'create', 'register']) or 'new' in msg:
+        await send_whatsapp_message(phone,
+            "Great! Let's get you set up. First — what do you need help with?\n\n"
+            "*1* — My schoolwork\n"
+            "*2* — Preparing for a test or exam\n"
+            "*3* — I just want to learn something new\n\n"
+            "_(Reply with the number)_"
+        )
+        await update_conversation_state(conversation['id'], 'whatsapp', phone,
+            {'conversation_state': {'awaiting_response_for': 'student_goal', 'is_new_student': True}}
+        )
+        return
+    
+    await send_whatsapp_message(phone, "Please reply with *1* (New) or *2* (Existing).")
+
+async def _step_student_goal(phone: str, conversation: dict, message: str, state: dict):
+    msg = message.strip().lower()
+    goal_map = {'1': 'schoolwork', '2': 'exam prep', '3': 'learning', 'school': 'schoolwork', 'exam': 'exam prep', 'learn': 'learning'}
+    goal = next((v for k, v in goal_map.items() if k in msg), None)
+    
+    if not goal:
+        await send_whatsapp_message(phone, "Pick one:\n1—Schoolwork\n2—Exam Prep\n3—Learning")
+        return
+    
+    await send_whatsapp_message(phone,
+        f"Got it — {goal}. Before we continue, please accept our Terms of Service.\n\n"
+        "By using WaxPrep, you agree to use it for your own study and keep your PIN private.\n\n"
+        f"Full Terms: {settings.TERMS_URL}\n\nType *YES* to accept."
+    )
+    await update_conversation_state(conversation['id'], 'whatsapp', phone,
+        {'conversation_state': {**state, 'student_goal': goal, 'awaiting_response_for': 'terms_acceptance'}}
+    )
 
 async def _step_terms_acceptance(phone: str, conversation: dict, message: str, state: dict):
     msg = message.strip().lower()
+    is_new = state.get('is_new_student', True)
     if msg in ['yes', 'y', 'agree', 'accept', 'ok', '1']:
-        await send_whatsapp_message(phone, "Thank you! What is your full name?")
-        await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {**state, 'terms_accepted': True, 'awaiting_response_for': 'name'}})
+        if is_new:
+            await send_whatsapp_message(phone, "Thank you! What is your full name?")
+            await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {**state, 'terms_accepted': True, 'awaiting_response_for': 'name'}})
+        else:
+            await send_whatsapp_message(phone, "Welcome back!\n\nSend your WAX ID to log in.")
+            await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {'awaiting_response_for': 'wax_id_entry'}})
     else:
         await send_whatsapp_message(phone, "Type *YES* to accept and continue.")
 
@@ -88,7 +133,6 @@ async def _step_name(phone: str, conversation: dict, message: str, state: dict):
         await send_whatsapp_message(phone, "That name seems too short. Please enter your full name.")
         return
 
-    # Reject single‑word or clearly fake names
     invalid_names = {'wa', 'ok', 'hi', 'no', 'yes', 'test', 'ab', 'cd', 'name', 'student', 'user'}
     if name.lower() in invalid_names or len(name.split()) < 2:
         await send_whatsapp_message(
