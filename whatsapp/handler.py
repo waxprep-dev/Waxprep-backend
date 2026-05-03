@@ -348,7 +348,7 @@ async def route_message(phone: str, name: str, message: str,
         return
 
     # If student asks for a quiz while another quiz is pending, remind them
-    if conv_state.get('current_question'):
+    if conv_state.get('current_question') and any(kw in message.lower() for kw in ['quiz', 'test me', 'question me']):
         await send_whatsapp_message(phone, "You still have a question waiting. Answer that one first, then we'll keep going.")
         return
 
