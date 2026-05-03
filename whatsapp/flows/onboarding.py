@@ -89,9 +89,20 @@ async def _step_pin_entry(phone: str, conversation: dict, message: str, state: d
 async def _step_name(phone: str, conversation: dict, message: str, state: dict):
     from helpers import clean_name
     name = clean_name(message)
-    if len(name) < 2:
-        await send_whatsapp_message(phone, "Name too short. Enter your full name.")
+    
+    if len(name) < 3:
+        await send_whatsapp_message(phone, "That name seems too short. Please enter your full name.")
         return
+
+    # Reject single‑word or clearly fake names
+    invalid_names = {'wa', 'ok', 'hi', 'no', 'yes', 'test', 'ab', 'cd', 'name', 'student', 'user'}
+    if name.lower() in invalid_names or len(name.split()) < 2:
+        await send_whatsapp_message(
+            phone,
+            "Please enter your first and last name, like *Chidera Emeka* or *Amina Bello*."
+        )
+        return
+
     options = '\n'.join([f"{i+1}. {lvl}" for i, lvl in enumerate(CLASS_LEVELS)])
     await send_whatsapp_message(phone, f"Nice to meet you, *{name.split()[0]}*!\n\nWhat class are you in?\n\n{options}")
     await update_conversation_state(conversation['id'], 'whatsapp', phone, {'conversation_state': {**state, 'name': name, 'awaiting_response_for': 'class_level'}})
