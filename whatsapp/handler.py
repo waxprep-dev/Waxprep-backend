@@ -175,6 +175,10 @@ async def route_message(phone: str, name: str, message: str,
         )
         return
 
+    if student and student.get('is_deleted'):
+        await send_whatsapp_message(phone, "This account has been deleted. Create a new one anytime.")
+        return
+
     student_id = student['id'] if student else 'anonymous'
     conversation = await get_or_create_conversation(
         student_id=student_id,
