@@ -26,7 +26,8 @@ async def handle_onboarding_response(chat_id: int, conversation: dict, message: 
         'student_goal': _step_student_goal,
         'terms_acceptance': _step_terms_acceptance,
         'wax_id_entry': _step_wax_id_entry, 'pin_entry': _step_pin_entry,
-        'name': _step_name, 'class_level': _step_class_level, 'target_exam': _step_target_exam,
+        'name': _step_name, 'difficult_subject': _step_difficult_subject,
+        'class_level': _step_class_level, 'target_exam': _step_target_exam,
         'subjects': _step_subjects, 'exam_date': _step_exam_date, 'exam_year_confirm': _step_exam_year_confirm,
         'state': _step_state, 'language_pref': _step_language_pref, 
         'pin_setup': _step_pin_setup, 'pin_confirm': _step_pin_confirm,
@@ -39,7 +40,6 @@ async def handle_onboarding_response(chat_id: int, conversation: dict, message: 
 async def _step_new_or_existing(chat_id, conversation, message, state):
     msg = message.strip().lower()
     
-    # Returning student — show terms, then WAX ID
     if any(k in msg for k in ['2', 'existing', 'login', 'log in', 'have', 'wax']):
         await send_telegram_message(chat_id,
             "Before we log you in, please accept our Terms of Service.\n\n"
@@ -52,7 +52,6 @@ async def _step_new_or_existing(chat_id, conversation, message, state):
         )
         return
     
-    # New student — ask what they need FIRST (no terms yet)
     if any(k in msg for k in ['1', 'new', "i'm new", 'create', 'register', 'signup']) or 'new' in msg:
         await send_telegram_message(chat_id,
             "Great! Let's get you set up. First — what do you need help with?\n\n"
@@ -66,7 +65,6 @@ async def _step_new_or_existing(chat_id, conversation, message, state):
         )
         return
     
-    # Unclear — ask again
     await send_telegram_message(chat_id,
         "Are you new to WaxPrep, or do you already have an account?\n\n"
         "*1* — I'm new\n"
@@ -97,7 +95,6 @@ async def _step_student_goal(chat_id, conversation, message, state):
         )
         return
     
-    # Now show terms, then continue to name
     await send_telegram_message(chat_id,
         f"Got it — {goal}. Before we continue, please accept our Terms of Service.\n\n"
         "By using WaxPrep, you agree to use it for your own study, keep your PIN private, "
@@ -191,11 +188,43 @@ async def _step_name(chat_id, conversation, message, state):
         )
         return
 
-    if len(name) > 100: await send_telegram_message(chat_id, "Please enter just your first and last name."); return
+    if len(name) > 100:
+        await send_telegram_message(chat_id, "Please enter just your first and last name.")
+        return
+
     first = name.split()[0]
-    options = '\n'.join([f"{i+1}. {lvl}" for i, lvl in enumerate(CLASS_LEVELS)])
-    await send_telegram_message(chat_id, f"Nice to meet you, *{first}*!\n\nWhat class are you in?\n\n{options}\n\n_(Reply with the number or class name)_")
-    await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {'conversation_state': {**state, 'name': name, 'awaiting_response_for': 'class_level'}})
+    subjects_list = EXAM_SUBJECTS.get('WAEC', EXAM_SUBJECTS['JAMB'])
+    subjects_preview = '\n'.join([f"{s}" for s in subjects_list[:8]])
+
+    await send_telegram_message(
+        chat_id,
+        f"Nice to meet you, *{first}*!\n\n"
+        f"Before we go further — which subject gives you the most trouble right now?\n\n"
+        f"For example:\n{subjects_preview}\n... or anything else.\n\n"
+        f"_(Just type the subject name)_"
+    )
+    await update_conversation_state(
+        conversation['id'], 'telegram', str(chat_id),
+        {'conversation_state': {**state, 'name': name, 'awaiting_response_for': 'difficult_subject'}}
+    )
+
+
+async def _step_difficult_subject(chat_id, conversation, message, state):
+    difficult_subject = message.strip()
+    first = state.get('name', 'Student').split()[0]
+
+    # Store it in the state
+    await send_telegram_message(
+        chat_id,
+        f"*{difficult_subject}* — good to know. I'll make sure we give that extra attention.\n\n"
+        f"Now, what class are you in?\n\n"
+        f"{chr(10).join([f'{i+1}. {lvl}' for i, lvl in enumerate(CLASS_LEVELS)])}\n\n"
+        f"_(Reply with the number or class name)_"
+    )
+    await update_conversation_state(
+        conversation['id'], 'telegram', str(chat_id),
+        {'conversation_state': {**state, 'difficult_subject': difficult_subject, 'awaiting_response_for': 'class_level'}}
+    )
 
 
 async def _step_class_level(chat_id, conversation, message, state):
