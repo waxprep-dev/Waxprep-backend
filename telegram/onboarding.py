@@ -115,7 +115,20 @@ async def _step_pin_entry(chat_id, conversation, message, state):
 async def _step_name(chat_id, conversation, message, state):
     from helpers import clean_name
     name = clean_name(message)
-    if len(name) < 2: await send_telegram_message(chat_id, "That name seems too short. Please enter your full name."); return
+
+    if len(name) < 3:
+        await send_telegram_message(chat_id, "That name seems too short. Please enter your full name.")
+        return
+
+    # Reject single‑word or clearly fake names
+    invalid_names = {'wa', 'ok', 'hi', 'no', 'yes', 'test', 'ab', 'cd', 'name', 'student', 'user'}
+    if name.lower() in invalid_names or len(name.split()) < 2:
+        await send_telegram_message(
+            chat_id,
+            "Please enter your first and last name, like *Chidera Emeka* or *Amina Bello*."
+        )
+        return
+
     if len(name) > 100: await send_telegram_message(chat_id, "Please enter just your first and last name."); return
     first = name.split()[0]
     options = '\n'.join([f"{i+1}. {lvl}" for i, lvl in enumerate(CLASS_LEVELS)])
