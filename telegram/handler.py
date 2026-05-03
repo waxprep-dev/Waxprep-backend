@@ -237,6 +237,11 @@ async def process_telegram_update(update: dict) -> None:
         await handle_verify_payment(str(chat_id), student, 'telegram')
         return
 
+    # If student asks for a quiz while another quiz is pending, remind them
+    if conv_state.get('current_question'):
+        await send_telegram_message(chat_id, "You still have a question waiting. Answer that one first, then we'll keep going.")
+        return
+
     if trigger == 'PROGRESS':
         from database.students import get_student_profile_summary
         summary = await get_student_profile_summary(student)
@@ -628,30 +633,3 @@ async def _send_diagnostic_telegram(chat_id: int):
            f"Free Model: {settings.GROQ_FREE_MODEL}\n"
            f"Scholar Model: {settings.GROQ_SMART_MODEL}")
     await send_telegram_message(chat_id, msg)
-
-
-async def _handle_callback_query(callback_query: dict):
-    from telegram.sender import send_telegram_message
-    data = callback_query.get('data', '')
-    message = callback_query.get('message', {})
-    chat = message.get('chat', {})
-    chat_id = chat.get('id')
-    if not chat_id or not data:
-        return
-
-    import httpx
-    try:
-        url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
-        async with httpx.AsyncClient() as client:
-            await client.post(url, json={"callback_query_id": callback_query['id']})
-    except Exception:
-        pass
-
-    fake_update = {
-        "message": {
-            "chat": {"id": chat_id},
-            "from": message.get('from', {}),
-            "text": data
-        }
-    }
-    await process_telegram_update(fake_update)
