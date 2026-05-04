@@ -326,3 +326,54 @@ def release_student_lock(student_id: str):
         redis_client.delete(key)
     except Exception as e:
         print(f"Lock release error: {e}")
+
+
+# --- ONBOARDING STATE FOR UNREGISTERED USERS ---
+# Pre-registration onboarding state is stored directly in Redis
+# keyed by platform and platform_user_id (phone or chat ID).
+# This is separate from the conversation system because anonymous
+# users don't have a real conversation record in Supabase yet.
+
+ONBOARDING_STATE_TTL = 3600  # 1 hour to complete onboarding
+
+
+async def get_onboarding_state(platform: str, platform_user_id: str) -> dict:
+    """
+    Load the onboarding state for an unregistered user from Redis.
+    Returns an empty dict if nothing is stored yet.
+    """
+    key = f"onboarding_state:{platform}:{platform_user_id}"
+    try:
+        data = redis_client.get(key)
+        if data:
+            return json.loads(data)
+    except Exception as e:
+        print(f"get_onboarding_state error: {e}")
+    return {}
+
+
+async def save_onboarding_state(platform: str, platform_user_id: str, state: dict):
+    """
+    Save the onboarding state for an unregistered user to Redis.
+    The state will expire after ONBOARDING_STATE_TTL seconds.
+    """
+    key = f"onboarding_state:{platform}:{platform_user_id}"
+    try:
+        redis_client.setex(
+            key,
+            ONBOARDING_STATE_TTL,
+            json.dumps(state, default=str)
+        )
+    except Exception as e:
+        print(f"save_onboarding_state error: {e}")
+
+
+async def clear_onboarding_state(platform: str, platform_user_id: str):
+    """
+    Delete the onboarding state from Redis after successful registration.
+    """
+    key = f"onboarding_state:{platform}:{platform_user_id}"
+    try:
+        redis_client.delete(key)
+    except Exception as e:
+        print(f"clear_onboarding_state error: {e}")
