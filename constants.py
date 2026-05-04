@@ -131,15 +131,15 @@ WELCOME_VARIANTS = [
     # Variant A – Direct Hook
     "Hey there! 👋 I'm Wax — your personal study buddy. I help students understand tough topics, prep for exams, and actually feel ready. Are you new here, or do you have an account already?",
 
-    # Variant B – Warm Observer
-    "Hey! I'm Wax. You sound like you've got something on your mind — schoolwork, maybe? Or an exam coming up? Whatever it is, I'm here to help. What's your name?",
+    # Variant B – Warm & Simple
+    "Hi! I'm Wax — your study partner. I'm here to help you with schoolwork, exams, and anything you're trying to understand better. First things first — are you new to WaxPrep, or have you been here before?",
 
-    # Variant C – Gentle Start
-    "Hi there! I'm Wax. I help students understand things they've been struggling with — no rush, no judgement. What's your name?",
+    # Variant C – Gentle & Curious
+    "Welcome! I'm Wax. Before we dive in — have we met before, or is this your first time?",
 
-    # Variant D – Goal-First
-    "Welcome! Before we begin — are you here for schoolwork, exam prep, or just curious to learn something new?",
+    # Variant D – Casual & Fast
+    "Hey, what's up! Wax here — your go-to study buddy. Quick one: are you new, or do you already have a WAX ID?",
 
-    # Variant E – Balanced Warm
-    "Welcome! I'm Wax, your personal study buddy. Whether you're preparing for an exam or just trying to understand today's classwork better, I've got you. What's your first name?",
+    # Variant E – Warm & Clear
+    "Hi there! I'm Wax — I help Nigerian students like you study smarter, not harder. Let's get you set up. Are you creating a new account, or do you already have one?",
 ]
