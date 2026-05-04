@@ -124,11 +124,12 @@ def get_welcome_intro(subjects: list) -> str:
     # Fallback: pick the first subject and give a general tip
     first = subjects[0] if subjects else 'your subject'
     return f"Let's start with {first} — that's a strong choice. We'll build your foundation step by step. Ready?"
-    # ——— Welcome Message Variants (A/B testing) ———
+
+# ——— Welcome Message Variants (A/B testing) ———
 
 WELCOME_VARIANTS = [
     # Variant A – Direct Hook
-    "Hey there! 👋 I'm Wax — your study buddy. Quick question: what's the one subject that gives you the most trouble right now? (Be honest — no judgement here.)",
+    "Hey there! 👋 I'm Wax — your personal study buddy. I help students understand tough topics, prep for exams, and actually feel ready. Are you new here, or do you have an account already?",
 
     # Variant B – Warm Observer
     "Hey! I'm Wax. You sound like you've got something on your mind — schoolwork, maybe? Or an exam coming up? Whatever it is, I'm here to help. What's your name?",
