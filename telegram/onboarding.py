@@ -127,22 +127,63 @@ async def _step_wax_id_entry(chat_id, conversation, message, state):
     from helpers import extract_wax_id
     from features.wax_id import get_student_by_wax_id
     from database.cache import get_failed_pin_count
+
+    msg = message.strip()
+
+    # FIRST: Check if student wants to escape to new account
+    escape_keywords = ['new', 'create', 'register', 'signup', 'fresh', "i don't have", 'i dont have', 'no id', 'no account', 'start over', 'reset', 'none', 'i am new', "i'm new"]
+    if any(k in msg.lower() for k in escape_keywords):
+        await send_telegram_message(chat_id,
+            "No problem! Let's create a fresh account for you. First — what do you need help with?\n\n"
+            "*1* — My schoolwork\n"
+            "*2* — Preparing for a test or exam\n"
+            "*3* — I just want to learn something new\n\n"
+            "_(Reply with the number, or just tell me in your own words)_"
+        )
+        await update_conversation_state(conversation['id'], 'telegram', str(chat_id),
+            {'conversation_state': {'awaiting_response_for': 'student_goal', 'is_new_student': True}}
+        )
+        return
+
     wax_id = extract_wax_id(message)
     if not wax_id:
         clean = message.strip().upper().replace(' ', '')
-        if re.match(r'^WAX[A-Z][A-Z0-9]{5}$', clean): wax_id = f"WAX-{clean[3:]}"
+        if re.match(r'^WAX[A-Z][A-Z0-9]{5}$', clean):
+            wax_id = f"WAX-{clean[3:]}"
         else:
-            await send_telegram_message(chat_id, "That does not look like a valid WAX ID.\n\nYour WAX ID looks like: *WAX-A74892*\n\nCheck and try again, or type *NEW* to create a fresh account.")
+            await send_telegram_message(chat_id,
+                "That does not look like a valid WAX ID.\n\n"
+                "Your WAX ID looks like: *WAX-A74892*\n\n"
+                "Check and try again, or type *NEW* to create a fresh account."
+            )
             return
+
     student = await get_student_by_wax_id(wax_id)
     if not student:
-        await send_telegram_message(chat_id, f"No account found with WAX ID *{wax_id}*.\n\nDouble-check your WAX ID.\n\nOr type *NEW* to create a fresh account.")
+        await send_telegram_message(chat_id,
+            f"No account found with WAX ID *{wax_id}*.\n\n"
+            "Double-check your WAX ID, or type *NEW* to create a fresh account."
+        )
         return
-    if student.get('is_banned'): await send_telegram_message(chat_id, "This account has been suspended. Contact support."); return
-    if get_failed_pin_count(student['id']) >= 5: await send_telegram_message(chat_id, "Account Temporarily Locked\n\nToo many wrong PIN attempts. Locked for 30 minutes.\n\nPlease try again later."); return
+    if student.get('is_banned'):
+        await send_telegram_message(chat_id, "This account has been suspended. Contact support.")
+        return
+    if get_failed_pin_count(student['id']) >= 5:
+        await send_telegram_message(chat_id,
+            "Account Temporarily Locked\n\n"
+            "Too many wrong PIN attempts. Locked for 30 minutes.\n\n"
+            "Please try again later."
+        )
+        return
+
     name = student['name'].split()[0]
-    await send_telegram_message(chat_id, f"Found it! Welcome back, *{name}*!\n\nPlease enter your 4-digit PIN to log in.")
-    await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {'conversation_state': {'awaiting_response_for': 'pin_entry', 'pending_wax_id': wax_id}})
+    await send_telegram_message(chat_id,
+        f"Found it! Welcome back, *{name}*!\n\n"
+        "Please enter your 4-digit PIN to log in."
+    )
+    await update_conversation_state(conversation['id'], 'telegram', str(chat_id),
+        {'conversation_state': {'awaiting_response_for': 'pin_entry', 'pending_wax_id': wax_id}}
+    )
 
 
 async def _step_pin_entry(chat_id, conversation, message, state):
