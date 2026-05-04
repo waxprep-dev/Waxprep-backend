@@ -94,6 +94,11 @@ async def process_telegram_update(update: dict) -> None:
         if awaiting and awaiting in ONBOARDING_STATES:
             from telegram.onboarding import handle_onboarding_response as tg_onboarding_response
             await tg_onboarding_response(chat_id, conversation, text)
+        elif awaiting:
+            # State exists but is unknown — log it and restart gracefully
+            print(f"Unknown onboarding state for {chat_id}: {awaiting}")
+            from telegram.onboarding import handle_new_or_existing as tg_onboarding
+            await tg_onboarding(chat_id, conversation, text)
         else:
             from telegram.onboarding import handle_new_or_existing as tg_onboarding
             await tg_onboarding(chat_id, conversation, text)
