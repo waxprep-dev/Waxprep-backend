@@ -8,38 +8,57 @@ from database.conversations import update_conversation_state
 from config.settings import settings
 from constants import EXAM_SUBJECTS, CLASS_LEVELS, NIGERIAN_STATES, SUBJECT_INTROS, get_welcome_intro, WELCOME_VARIANTS
 
+# Helper: save onboarding state to Redis for unregistered users
+async def _save_onboarding_state(chat_id, state_dict):
+    """Saves the current onboarding step to Redis so it survives between messages."""
+    from database.conversations import save_onboarding_state
+    await save_onboarding_state('telegram', str(chat_id), state_dict)
+
+
 async def handle_new_or_existing(chat_id: int, conversation: dict, message: str):
     welcome = random.choice(WELCOME_VARIANTS)
     await send_telegram_message(chat_id, welcome)
-    await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {'conversation_state': {'awaiting_response_for': 'new_or_existing'}})
+    # Save state in Redis for anonymous users
+    await _save_onboarding_state(chat_id, {'awaiting_response_for': 'new_or_existing'})
 
 
-async def handle_onboarding_response(chat_id: int, conversation: dict, message: str):
-    raw_state = conversation.get('conversation_state', {})
-    if isinstance(raw_state, str):
-        try: state = json.loads(raw_state)
-        except Exception: state = {}
-    else: state = raw_state or {}
+async def handle_onboarding_response(chat_id: int, conversation: dict, message: str, onboarding_state_override: dict = None):
+    # Use the override state (from handler.py's Redis store) if provided,
+    # otherwise fall back to reading from the conversation object.
+    if onboarding_state_override is not None:
+        state = onboarding_state_override
+    else:
+        raw_state = conversation.get('conversation_state', {})
+        if isinstance(raw_state, str):
+            try:
+                state = json.loads(raw_state)
+            except Exception:
+                state = {}
+        else:
+            state = raw_state or {}
+
     awaiting = state.get('awaiting_response_for', '')
     handlers = {
-        'new_or_existing': _step_new_or_existing, 
+        'new_or_existing': _step_new_or_existing,
         'student_goal': _step_student_goal,
         'terms_acceptance': _step_terms_acceptance,
         'wax_id_entry': _step_wax_id_entry, 'pin_entry': _step_pin_entry,
         'name': _step_name, 'difficult_subject': _step_difficult_subject,
         'class_level': _step_class_level, 'target_exam': _step_target_exam,
         'subjects': _step_subjects, 'exam_date': _step_exam_date, 'exam_year_confirm': _step_exam_year_confirm,
-        'state': _step_state, 'language_pref': _step_language_pref, 
+        'state': _step_state, 'language_pref': _step_language_pref,
         'pin_setup': _step_pin_setup, 'pin_confirm': _step_pin_confirm,
     }
     handler = handlers.get(awaiting)
-    if handler: await handler(chat_id, conversation, message, state)
-    else: await handle_new_or_existing(chat_id, conversation, message)
+    if handler:
+        await handler(chat_id, conversation, message, state)
+    else:
+        await handle_new_or_existing(chat_id, conversation, message)
 
 
 async def _step_new_or_existing(chat_id, conversation, message, state):
     msg = message.strip().lower()
-    
+
     if any(k in msg for k in ['2', 'existing', 'login', 'log in', 'have', 'wax']):
         await send_telegram_message(chat_id,
             "Before we log you in, please accept our Terms of Service.\n\n"
@@ -47,11 +66,9 @@ async def _step_new_or_existing(chat_id, conversation, message, state):
             f"and not misuse the platform.\n\nFull Terms: {settings.TERMS_URL}\n\n"
             "Type *YES* to accept and log in."
         )
-        await update_conversation_state(conversation['id'], 'telegram', str(chat_id),
-            {'conversation_state': {'awaiting_response_for': 'terms_acceptance', 'is_new_student': False}}
-        )
+        await _save_onboarding_state(chat_id, {'awaiting_response_for': 'terms_acceptance', 'is_new_student': False})
         return
-    
+
     if any(k in msg for k in ['1', 'new', "i'm new", 'create', 'register', 'signup']) or 'new' in msg:
         await send_telegram_message(chat_id,
             "Great! Let's get you set up. First — what do you need help with?\n\n"
@@ -60,11 +77,9 @@ async def _step_new_or_existing(chat_id, conversation, message, state):
             "*3* — I just want to learn something new\n\n"
             "_(Reply with the number, or just tell me in your own words)_"
         )
-        await update_conversation_state(conversation['id'], 'telegram', str(chat_id),
-            {'conversation_state': {'awaiting_response_for': 'student_goal', 'is_new_student': True}}
-        )
+        await _save_onboarding_state(chat_id, {'awaiting_response_for': 'student_goal', 'is_new_student': True})
         return
-    
+
     await send_telegram_message(chat_id,
         "Are you new to WaxPrep, or do you already have an account?\n\n"
         "*1* — I'm new\n"
@@ -74,18 +89,18 @@ async def _step_new_or_existing(chat_id, conversation, message, state):
 
 async def _step_student_goal(chat_id, conversation, message, state):
     msg = message.strip().lower()
-    
+
     goal_map = {
         '1': 'schoolwork', '2': 'exam prep', '3': 'learning',
         'school': 'schoolwork', 'exam': 'exam prep', 'learn': 'learning',
     }
-    
+
     goal = None
     for key, value in goal_map.items():
         if key in msg:
             goal = value
             break
-    
+
     if not goal:
         await send_telegram_message(chat_id,
             "Just pick one that's closest:\n\n"
@@ -94,16 +109,14 @@ async def _step_student_goal(chat_id, conversation, message, state):
             "*3* — I just want to learn something new"
         )
         return
-    
+
     await send_telegram_message(chat_id,
         f"Got it — {goal}. Before we continue, please accept our Terms of Service.\n\n"
         "By using WaxPrep, you agree to use it for your own study, keep your PIN private, "
         f"and not misuse the platform.\n\nFull Terms: {settings.TERMS_URL}\n\n"
         "Type *YES* to accept and create your account."
     )
-    await update_conversation_state(conversation['id'], 'telegram', str(chat_id),
-        {'conversation_state': {**state, 'student_goal': goal, 'awaiting_response_for': 'terms_acceptance'}}
-    )
+    await _save_onboarding_state(chat_id, {**state, 'student_goal': goal, 'awaiting_response_for': 'terms_acceptance'})
 
 
 async def _step_terms_acceptance(chat_id, conversation, message, state):
@@ -113,10 +126,10 @@ async def _step_terms_acceptance(chat_id, conversation, message, state):
     if msg in ['yes', 'y', 'agree', 'accept', 'i agree', 'i accept', 'ok', 'okay', '1']:
         if is_new:
             await send_telegram_message(chat_id, "Thank you! Let's set up your account.\n\nFirst, what is your full name?\n\n_(Type your name and send)_")
-            await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {'conversation_state': {**state, 'terms_accepted': True, 'awaiting_response_for': 'name'}})
+            await _save_onboarding_state(chat_id, {**state, 'terms_accepted': True, 'awaiting_response_for': 'name'})
         else:
             await send_telegram_message(chat_id, "Welcome back!\n\nSend your WAX ID to log in.\n\nIt looks like: *WAX-A74892*")
-            await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {'conversation_state': {'awaiting_response_for': 'wax_id_entry'}})
+            await _save_onboarding_state(chat_id, {'awaiting_response_for': 'wax_id_entry'})
     elif msg in ['no', 'n', 'decline', 'reject', '2']:
         await send_telegram_message(chat_id, "No problem. Come back anytime.\n\nWaxPrep is here whenever you're ready.\n\nType *HI* to start again.")
     else:
@@ -140,9 +153,7 @@ async def _step_wax_id_entry(chat_id, conversation, message, state):
             "*3* — I just want to learn something new\n\n"
             "_(Reply with the number, or just tell me in your own words)_"
         )
-        await update_conversation_state(conversation['id'], 'telegram', str(chat_id),
-            {'conversation_state': {'awaiting_response_for': 'student_goal', 'is_new_student': True}}
-        )
+        await _save_onboarding_state(chat_id, {'awaiting_response_for': 'student_goal', 'is_new_student': True})
         return
 
     wax_id = extract_wax_id(message)
@@ -181,9 +192,7 @@ async def _step_wax_id_entry(chat_id, conversation, message, state):
         f"Found it! Welcome back, *{name}*!\n\n"
         "Please enter your 4-digit PIN to log in."
     )
-    await update_conversation_state(conversation['id'], 'telegram', str(chat_id),
-        {'conversation_state': {'awaiting_response_for': 'pin_entry', 'pending_wax_id': wax_id}}
-    )
+    await _save_onboarding_state(chat_id, {'awaiting_response_for': 'pin_entry', 'pending_wax_id': wax_id})
 
 
 async def _step_pin_entry(chat_id, conversation, message, state):
@@ -191,24 +200,34 @@ async def _step_pin_entry(chat_id, conversation, message, state):
     from database.cache import record_failed_pin, clear_failed_pins
     from helpers import verify_pin
     pending_wax_id = state.get('pending_wax_id', '')
-    if not pending_wax_id: await handle_new_or_existing(chat_id, conversation, message); return
+    if not pending_wax_id:
+        await handle_new_or_existing(chat_id, conversation, message)
+        return
     student = await get_student_by_wax_id(pending_wax_id)
-    if not student: await handle_new_or_existing(chat_id, conversation, message); return
+    if not student:
+        await handle_new_or_existing(chat_id, conversation, message)
+        return
     pin = message.strip()
     if not verify_pin(pin, student['pin_hash']):
         failed = record_failed_pin(student['id'])
         remaining = max(0, 5 - failed)
-        if remaining == 0: await send_telegram_message(chat_id, "Account Locked — Too many wrong attempts.\n\nLocked for 30 minutes.")
-        else: await send_telegram_message(chat_id, f"Wrong PIN. {remaining} attempt{'s' if remaining != 1 else ''} left.")
+        if remaining == 0:
+            await send_telegram_message(chat_id, "Account Locked — Too many wrong attempts.\n\nLocked for 30 minutes.")
+        else:
+            await send_telegram_message(chat_id, f"Wrong PIN. {remaining} attempt{'s' if remaining != 1 else ''} left.")
         return
     clear_failed_pins(student['id'])
     await link_platform_to_student(student['id'], 'telegram', str(chat_id))
+    # Clear onboarding state since the student is now logged in
+    from database.conversations import clear_onboarding_state
+    await clear_onboarding_state('telegram', str(chat_id))
     await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {'student_id': student['id'], 'current_mode': 'default', 'conversation_state': {}})
     from database.students import get_student_subscription_status
     status = await get_student_subscription_status(student)
     name = student['name'].split()[0]
     welcome_back = f"Welcome back, *{name}*!\n\nWAX ID: {pending_wax_id}\nPlan: {status['display_tier']}\nStreak: {student.get('current_streak', 0)} day{'s' if student.get('current_streak', 0) != 1 else ''}\nTotal Questions: {student.get('total_questions_answered', 0):,}\n\n"
-    if student.get('current_streak', 0) > 0: welcome_back += f"Your {student.get('current_streak')}-day streak is waiting. Keep it alive today!\n\n"
+    if student.get('current_streak', 0) > 0:
+        welcome_back += f"Your {student.get('current_streak')}-day streak is waiting. Keep it alive today!\n\n"
     welcome_back += "What would you like to study? Just ask me anything."
     await send_telegram_message(chat_id, welcome_back)
 
@@ -244,18 +263,15 @@ async def _step_name(chat_id, conversation, message, state):
         f"For example:\n{subjects_preview}\n... or anything else.\n\n"
         f"_(Just type the subject name)_"
     )
-    await update_conversation_state(
-        conversation['id'], 'telegram', str(chat_id),
-        {'conversation_state': {**state, 'name': name, 'awaiting_response_for': 'difficult_subject'}}
-    )
+    await _save_onboarding_state(chat_id, {**state, 'name': name, 'awaiting_response_for': 'difficult_subject'})
 
 
 async def _step_difficult_subject(chat_id, conversation, message, state):
     difficult_subject = message.strip()
     first = state.get('name', 'Student').split()[0]
-    class_level = state.get('class_level', 'SS3')  # default, will be properly set later
+    class_level = state.get('class_level', 'SS3')
 
-    # Step 1: Immediate acknowledgment — student knows we heard them
+    # Step 1: Immediate acknowledgment
     await send_telegram_message(
         chat_id,
         f"*{difficult_subject}* — excellent choice. Let me show you something real quick..."
@@ -275,23 +291,15 @@ async def _step_difficult_subject(chat_id, conversation, message, state):
         f"{chr(10).join([f'{i+1}. {lvl}' for i, lvl in enumerate(CLASS_LEVELS)])}\n\n"
         f"_(Reply with the number or class name)_"
     )
-    await update_conversation_state(
-        conversation['id'], 'telegram', str(chat_id),
-        {'conversation_state': {**state, 'difficult_subject': difficult_subject, 'awaiting_response_for': 'class_level'}}
-    )
+    await _save_onboarding_state(chat_id, {**state, 'difficult_subject': difficult_subject, 'awaiting_response_for': 'class_level'})
 
 
 async def _generate_magic_trick(chat_id: int, subject: str, student_name: str, class_level: str) -> str:
-    """
-    Calls the AI to generate a short Magic Trick lesson.
-    If the AI call fails or times out, returns a warm fallback message
-    so the student never sees an error.
-    """
+    """Calls the AI for the Magic Trick lesson, with fallback."""
     import asyncio
     from ai.brain import magic_trick_lesson
 
     try:
-        # Wait max 12 seconds for the AI — if it takes longer, use fallback
         lesson = await asyncio.wait_for(
             magic_trick_lesson(subject, student_name, class_level),
             timeout=12.0
@@ -303,7 +311,6 @@ async def _generate_magic_trick(chat_id: int, subject: str, student_name: str, c
     except Exception as e:
         print(f"Magic Trick error for {subject}: {e[:100]}")
 
-    # Fallback — guaranteed to return something warm
     fallback_messages = {
         'physics': f"Ah, Physics. Most people fear it until they realise it's just the rules of how things move and work around us. Think of a danfo bus — when it suddenly brakes and you jerk forward, that's Physics in action. You already understand it more than you think, {student_name}.",
         'chemistry': f"Chemistry! It sounds intimidating but it's honestly just cooking with extra steps. When you soak garri and it swells, or when your puff-puff rises because of baking soda — that's Chemistry. You've been doing it since you were small, {student_name}.",
@@ -328,12 +335,16 @@ async def _step_class_level(chat_id, conversation, message, state):
     class_level = number_map.get(msg) or (msg if msg in CLASS_LEVELS else None)
     if not class_level:
         for lvl in CLASS_LEVELS:
-            if msg in lvl or lvl in msg: class_level = lvl; break
-    if not class_level: await send_telegram_message(chat_id, f"Please choose from: {', '.join(CLASS_LEVELS)}\n\n(Reply with the number 1-6)"); return
-    
+            if msg in lvl or lvl in msg:
+                class_level = lvl
+                break
+    if not class_level:
+        await send_telegram_message(chat_id, f"Please choose from: {', '.join(CLASS_LEVELS)}\n\n(Reply with the number 1-6)")
+        return
+
     from constants import JUNIOR_EXAMS, SENIOR_EXAMS
     is_junior = any(level in class_level.upper() for level in ['JSS'])
-    
+
     if is_junior:
         await send_telegram_message(
             chat_id,
@@ -343,13 +354,11 @@ async def _step_class_level(chat_id, conversation, message, state):
             "2 — BECE (Junior WAEC)\n\n"
             "_(Reply with the number)_"
         )
-        await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
-            'conversation_state': {**state, 'class_level': class_level, 'awaiting_response_for': 'target_exam'}
-        })
+        await _save_onboarding_state(chat_id, {**state, 'class_level': class_level, 'awaiting_response_for': 'target_exam'})
         return
 
     await send_telegram_message(chat_id, f"{class_level}!\n\nWhich exam are you preparing for?\n\n1 — JAMB (UTME)\n2 — WAEC (SSCE)\n3 — NECO\n4 — Common Entrance\n5 — Post-UTME\n\n_(Reply with the number)_")
-    await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {'conversation_state': {**state, 'class_level': class_level, 'awaiting_response_for': 'target_exam'}})
+    await _save_onboarding_state(chat_id, {**state, 'class_level': class_level, 'awaiting_response_for': 'target_exam'})
 
 
 async def _step_target_exam(chat_id, conversation, message, state):
@@ -361,22 +370,25 @@ async def _step_target_exam(chat_id, conversation, message, state):
         exam_map = {'1': 'COMMON_ENTRANCE', '2': 'BECE'}
     else:
         exam_map = {
-            '1': 'JAMB', 'JAMB': 'JAMB', 'UTME': 'JAMB', 
-            '2': 'WAEC', 'WAEC': 'WAEC', 'SSCE': 'WAEC', 'GCE': 'WAEC', 
-            '3': 'NECO', 'NECO': 'NECO', 
-            '4': 'COMMON_ENTRANCE', 'COMMON': 'COMMON_ENTRANCE', 
+            '1': 'JAMB', 'JAMB': 'JAMB', 'UTME': 'JAMB',
+            '2': 'WAEC', 'WAEC': 'WAEC', 'SSCE': 'WAEC', 'GCE': 'WAEC',
+            '3': 'NECO', 'NECO': 'NECO',
+            '4': 'COMMON_ENTRANCE', 'COMMON': 'COMMON_ENTRANCE',
             '5': 'POST_UTME', 'POST': 'POST_UTME', 'POSTUTME': 'POST_UTME'
         }
-        
+
     target_exams = [v for k, v in exam_map.items() if k in msg]
     target_exam = target_exams[0] if target_exams else None
     is_multi_exam = len(target_exams) > 1
-    if not target_exam: await send_telegram_message(chat_id, "Please reply with a valid number to choose your exam."); return
+    if not target_exam:
+        await send_telegram_message(chat_id, "Please reply with a valid number to choose your exam.")
+        return
     if is_multi_exam:
         available_subjects = []
         for exam in target_exams:
             for sub in EXAM_SUBJECTS.get(exam, []):
-                if sub not in available_subjects: available_subjects.append(sub)
+                if sub not in available_subjects:
+                    available_subjects.append(sub)
         exam_display = " + ".join(target_exams)
         note = f"{exam_display} — pick all the subjects you're sitting for."
     else:
@@ -384,7 +396,7 @@ async def _step_target_exam(chat_id, conversation, message, state):
         note = "JAMB requires 4 subjects (English + 3 others)." if target_exam == 'JAMB' else "Which subjects are you sitting for?"
     subject_list = '\n'.join([f"{i+1}. {sub}" for i, sub in enumerate(available_subjects[:15])])
     await send_telegram_message(chat_id, f"{' + '.join(target_exams) if is_multi_exam else target_exam}!\n\n{note}\n\n{subject_list}\n\n_(Reply with numbers separated by commas: e.g. 1,2,4,6)_")
-    await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {'conversation_state': {**state, 'target_exam': 'Multiple' if is_multi_exam else target_exam, 'target_exams': target_exams, 'available_subjects': available_subjects, 'awaiting_response_for': 'subjects'}})
+    await _save_onboarding_state(chat_id, {**state, 'target_exam': 'Multiple' if is_multi_exam else target_exam, 'target_exams': target_exams, 'available_subjects': available_subjects, 'awaiting_response_for': 'subjects'})
 
 
 async def _step_subjects(chat_id, conversation, message, state):
@@ -396,23 +408,29 @@ async def _step_subjects(chat_id, conversation, message, state):
         num = int(num_str)
         if 1 <= num <= len(available):
             sub = available[num - 1]
-            if sub not in selected: selected.append(sub)
+            if sub not in selected:
+                selected.append(sub)
     if not selected:
         msg_upper = message.upper()
         for sub in available:
-            if sub.upper() in msg_upper and sub not in selected: selected.append(sub)
-    if 'English Language' not in selected and target_exam in ['JAMB', 'WAEC', 'NECO', 'BECE']: selected.insert(0, 'English Language')
-    if len(selected) < 2: await send_telegram_message(chat_id, "Please select at least 2 subjects.\n\nReply with numbers: e.g. 1,2,4,6"); return
+            if sub.upper() in msg_upper and sub not in selected:
+                selected.append(sub)
+    if 'English Language' not in selected and target_exam in ['JAMB', 'WAEC', 'NECO', 'BECE']:
+        selected.insert(0, 'English Language')
+    if len(selected) < 2:
+        await send_telegram_message(chat_id, "Please select at least 2 subjects.\n\nReply with numbers: e.g. 1,2,4,6")
+        return
     subjects_display = '\n'.join([f"- {s}" for s in selected])
     await send_telegram_message(chat_id, f"Your subjects:\n{subjects_display}\n\nWhen is your exam?\n\n_(e.g. May 2026 or June 2026 or Not sure)_")
-    await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {'conversation_state': {**state, 'subjects': selected, 'awaiting_response_for': 'exam_date'}})
+    await _save_onboarding_state(chat_id, {**state, 'subjects': selected, 'awaiting_response_for': 'exam_date'})
 
 
 async def _step_exam_date(chat_id, conversation, message, state):
     from helpers import nigeria_now
     msg = message.strip().lower()
-    exam_date = None; days_left = 180
-    
+    exam_date = None
+    days_left = 180
+
     if any(k in msg for k in ['not sure', 'soon', 'this year', 'idk', "don't know", 'unsure', 'no', 'skip']):
         class_level = state.get('class_level', 'SS3')
         years_ahead = 2 if 'SS1' in class_level else (1 if 'SS2' in class_level else 0)
@@ -427,14 +445,12 @@ async def _step_exam_date(chat_id, conversation, message, state):
             "*1* — This year\n"
             "*2* — Next year"
         )
-        await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
-            'conversation_state': {
-                **state,
-                'pending_exam_date': exam_date,
-                'pending_days_left': days_left,
-                'pending_future_year': future_year,
-                'awaiting_response_for': 'exam_year_confirm'
-            }
+        await _save_onboarding_state(chat_id, {
+            **state,
+            'pending_exam_date': exam_date,
+            'pending_days_left': days_left,
+            'pending_future_year': future_year,
+            'awaiting_response_for': 'exam_year_confirm'
         })
         return
 
@@ -442,7 +458,7 @@ async def _step_exam_date(chat_id, conversation, message, state):
     year_match = re.search(r'20(2[4-9]|[3-9]\d)', msg)
     year = int(year_match.group(0)) if year_match else None
     month = next((m_num for m_name, m_num in months.items() if m_name in msg), None)
-    
+
     if month and year:
         exam_dt = datetime(year, month, 15)
         now_dt = datetime.now()
@@ -451,12 +467,14 @@ async def _step_exam_date(chat_id, conversation, message, state):
             return
         exam_date = f"{year}-{month:02d}-15"
         days_left = max(1, (exam_dt - now_dt).days)
-    
-    if not exam_date: await send_telegram_message(chat_id, "When is your exam?\n\nTry:\n- May 2026\n- June 2026\n- Not sure"); return
-    
+
+    if not exam_date:
+        await send_telegram_message(chat_id, "When is your exam?\n\nTry:\n- May 2026\n- June 2026\n- Not sure")
+        return
+
     urgency = f"\n\nOnly {days_left} days left! We need to move fast." if days_left < 30 else f"\n\n{days_left} days. Enough time if we stay focused." if days_left < 90 else f"\n\n{days_left} days — plenty of time if we start now and stay consistent."
     await send_telegram_message(chat_id, f"Got it!{urgency}\n\nWhich state are you in?\n\n_(e.g. Lagos, Abuja, Kano, Rivers)_")
-    await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {'conversation_state': {**state, 'exam_date': exam_date, 'days_until_exam': days_left, 'awaiting_response_for': 'state'}})
+    await _save_onboarding_state(chat_id, {**state, 'exam_date': exam_date, 'days_until_exam': days_left, 'awaiting_response_for': 'state'})
 
 
 async def _step_exam_year_confirm(chat_id: int, conversation: dict, message: str, state: dict):
@@ -481,33 +499,35 @@ async def _step_exam_year_confirm(chat_id: int, conversation: dict, message: str
         chat_id,
         f"Got it!{urgency}\n\nWhich state are you in?\n\n_(e.g. Lagos, Abuja, Kano, Rivers)_"
     )
-    await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
-        'conversation_state': {**state, 'exam_date': exam_date, 'days_until_exam': days_left, 'awaiting_response_for': 'state'}
-    })
+    await _save_onboarding_state(chat_id, {**state, 'exam_date': exam_date, 'days_until_exam': days_left, 'awaiting_response_for': 'state'})
 
 
 async def _step_state(chat_id, conversation, message, state):
     msg = message.strip().title()
     matched = next((s for s in NIGERIAN_STATES if msg.lower() in s.lower() or s.lower() in msg.lower()), msg)
     await send_telegram_message(chat_id, f"{matched}!\n\nHow should I explain things to you?\n\n*1* — Standard English\n*2* — Nigerian Pidgin mixed with English\n\n_(You can change this anytime)_")
-    await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {'conversation_state': {**state, 'student_state': matched, 'awaiting_response_for': 'language_pref'}})
+    await _save_onboarding_state(chat_id, {**state, 'student_state': matched, 'awaiting_response_for': 'language_pref'})
 
 
 async def _step_language_pref(chat_id, conversation, message, state):
     msg = message.strip().lower()
     language = 'pidgin' if any(k in msg for k in ['2', 'pidgin', 'naija']) else 'english'
     await send_telegram_message(chat_id, "Almost done!\n\nSet a 4-digit security PIN.\n\nYour PIN is how you log in on any device. Keep it private.\n\n_(Enter any 4 digits, e.g. 5823)_")
-    await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {'conversation_state': {**state, 'language_pref': language, 'awaiting_response_for': 'pin_setup'}})
+    await _save_onboarding_state(chat_id, {**state, 'language_pref': language, 'awaiting_response_for': 'pin_setup'})
 
 
 async def _step_pin_setup(chat_id, conversation, message, state):
     from helpers import is_valid_pin
     pin = message.strip()
     weak_pins = {'1234', '0000', '1111', '2222', '3333', '4444', '5555', '6666', '7777', '8888', '9999', '1212', '0123'}
-    if not is_valid_pin(pin): await send_telegram_message(chat_id, "Your PIN must be exactly 4 digits. Please try again."); return
-    if pin in weak_pins: await send_telegram_message(chat_id, "That PIN is too easy to guess. Please choose a more unique one."); return
+    if not is_valid_pin(pin):
+        await send_telegram_message(chat_id, "Your PIN must be exactly 4 digits. Please try again.")
+        return
+    if pin in weak_pins:
+        await send_telegram_message(chat_id, "That PIN is too easy to guess. Please choose a more unique one.")
+        return
     await send_telegram_message(chat_id, "Got it! Confirm your PIN by typing it again.")
-    await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {'conversation_state': {**state, 'pending_pin': pin, 'awaiting_response_for': 'pin_confirm'}})
+    await _save_onboarding_state(chat_id, {**state, 'pending_pin': pin, 'awaiting_response_for': 'pin_confirm'})
 
 
 async def _step_pin_confirm(chat_id, conversation, message, state):
@@ -518,31 +538,41 @@ async def _step_pin_confirm(chat_id, conversation, message, state):
     pending_pin = state.get('pending_pin', '')
     if pin_confirm != pending_pin:
         await send_telegram_message(chat_id, "Those PINs do not match.\n\nPlease enter your desired PIN again:")
-        await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {'conversation_state': {**state, 'pending_pin': None, 'awaiting_response_for': 'pin_setup'}})
+        await _save_onboarding_state(chat_id, {**state, 'pending_pin': None, 'awaiting_response_for': 'pin_setup'})
         return
     try:
         student = await create_student(phone=f"telegram:{chat_id}", name=state.get('name', 'Student'), pin=pending_pin, class_level=state.get('class_level'), target_exam=state.get('target_exam'), subjects=state.get('subjects', []), exam_date=state.get('exam_date'), state=state.get('student_state'), language_preference=state.get('language_pref', 'english'))
         await link_platform_to_student(student['id'], 'telegram', str(chat_id))
-        
-        from database.conversations import get_or_create_conversation, migrate_temp_to_real
+
+        from database.conversations import get_or_create_conversation, migrate_temp_to_real, clear_onboarding_state
+        from database.cache import invalidate_conversation
+
+        # Clear onboarding state from Redis — onboarding is complete
+        await clear_onboarding_state('telegram', str(chat_id))
+        # Invalidate any stale conversation cache so the next message creates a fresh real conversation
+        invalidate_conversation('telegram', str(chat_id))
+
         await migrate_temp_to_real('telegram', str(chat_id), student['id'])
         conversation = await get_or_create_conversation(
             student_id=student['id'],
             platform='telegram',
             platform_user_id=str(chat_id)
         )
-        
+
         await update_conversation_state(conversation['id'], 'telegram', str(chat_id), {
-            'student_id': student['id'], 
-            'current_mode': 'default', 
+            'student_id': student['id'],
+            'current_mode': 'default',
             'conversation_state': {}
         })
-        
+
         fire_and_forget(notify_admin_new_student(student, f"telegram:{chat_id}"))
-        name_first = student['name'].split()[0]; days_left = state.get('days_until_exam', 180)
+        name_first = student['name'].split()[0]
+        days_left = state.get('days_until_exam', 180)
         intro = get_welcome_intro(state.get('subjects', []))
-        class_level = state.get('class_level', 'your class'); exam_name = state.get('target_exam', 'your exams')
-        target_exams = state.get('target_exams', [exam_name]); exam_count = len(target_exams)
+        class_level = state.get('class_level', 'your class')
+        exam_name = state.get('target_exam', 'your exams')
+        target_exams = state.get('target_exams', [exam_name])
+        exam_count = len(target_exams)
         exam_display = f"{exam_count} exams — {exam_name}" if exam_count > 1 else exam_name
         welcome = (
             f"Welcome to WaxPrep, *{name_first}*!\n\n"
