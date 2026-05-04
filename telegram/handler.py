@@ -73,6 +73,19 @@ async def process_telegram_update(update: dict) -> None:
 
     # ----- Onboarding (no student yet) -----------------------------------
     if not student:
+        # Use the NEW Redis-based onboarding state store instead of
+        # the conversation system. Temp conversations lose state on every
+        # message because they can't persist to Supabase.
+        from database.conversations import get_onboarding_state
+        from ai.classifier import ONBOARDING_STATES
+        from telegram.onboarding import handle_onboarding_response as tg_onboarding_response
+        from telegram.onboarding import handle_new_or_existing as tg_onboarding
+
+        # Load onboarding state directly from Redis (keyed by platform + chat_id)
+        onboarding_state = await get_onboarding_state('telegram', str(chat_id))
+        awaiting = onboarding_state.get('awaiting_response_for', '')
+
+        # Also get a conversation object (needed for function signatures)
         from database.conversations import get_or_create_conversation
         conversation = await get_or_create_conversation(
             student_id='anonymous',
@@ -80,33 +93,11 @@ async def process_telegram_update(update: dict) -> None:
             platform_user_id=str(chat_id)
         )
 
-        # FIX: Ensure conversation_state is always a proper dict
-        conv_state = conversation.get('conversation_state', {})
-        if isinstance(conv_state, str):
-            import json
-            try:
-                conv_state = json.loads(conv_state)
-            except Exception:
-                conv_state = {}
-        if not isinstance(conv_state, dict):
-            conv_state = {}
-
-        # FIX: Also update the conversation object itself so it carries the parsed state
-        conversation['conversation_state'] = conv_state
-
-        awaiting = conv_state.get('awaiting_response_for', '')
-
-        from ai.classifier import ONBOARDING_STATES
         if awaiting and awaiting in ONBOARDING_STATES:
-            from telegram.onboarding import handle_onboarding_response as tg_onboarding_response
-            await tg_onboarding_response(chat_id, conversation, text)
-        elif awaiting:
-            # State exists but is unknown — log it and restart gracefully
-            print(f"Unknown onboarding state for {chat_id}: {awaiting}")
-            from telegram.onboarding import handle_new_or_existing as tg_onboarding
-            await tg_onboarding(chat_id, conversation, text)
+            # Continue from where they left off
+            await tg_onboarding_response(chat_id, conversation, text, onboarding_state_override=onboarding_state)
         else:
-            from telegram.onboarding import handle_new_or_existing as tg_onboarding
+            # Fresh start
             await tg_onboarding(chat_id, conversation, text)
         return
 
