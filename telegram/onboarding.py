@@ -16,6 +16,7 @@ async def _save_onboarding_state(chat_id, state_dict):
 
 
 async def handle_new_or_existing(chat_id: int, conversation: dict, message: str):
+    print(f"DEBUG handle_new_or_existing: chat_id={chat_id}")
     welcome = random.choice(WELCOME_VARIANTS)
     await send_telegram_message(chat_id, welcome)
     # Save state in Redis for anonymous users
@@ -57,6 +58,7 @@ async def handle_onboarding_response(chat_id: int, conversation: dict, message: 
 
 
 async def _step_new_or_existing(chat_id, conversation, message, state):
+    print(f"DEBUG _step_new_or_existing: chat_id={chat_id}, msg={message.strip()[:30]}")
     msg = message.strip().lower()
 
     if any(k in msg for k in ['2', 'existing', 'login', 'log in', 'have', 'wax']):
