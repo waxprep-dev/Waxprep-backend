@@ -80,6 +80,7 @@ async def process_telegram_update(update: dict) -> None:
             platform_user_id=str(chat_id)
         )
 
+        # FIX: Ensure conversation_state is always a proper dict
         conv_state = conversation.get('conversation_state', {})
         if isinstance(conv_state, str):
             import json
@@ -87,6 +88,11 @@ async def process_telegram_update(update: dict) -> None:
                 conv_state = json.loads(conv_state)
             except Exception:
                 conv_state = {}
+        if not isinstance(conv_state, dict):
+            conv_state = {}
+
+        # FIX: Also update the conversation object itself so it carries the parsed state
+        conversation['conversation_state'] = conv_state
 
         awaiting = conv_state.get('awaiting_response_for', '')
 
