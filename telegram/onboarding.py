@@ -212,12 +212,25 @@ async def _step_name(chat_id, conversation, message, state):
 async def _step_difficult_subject(chat_id, conversation, message, state):
     difficult_subject = message.strip()
     first = state.get('name', 'Student').split()[0]
+    class_level = state.get('class_level', 'SS3')  # default, will be properly set later
 
-    # Store it in the state
+    # Step 1: Immediate acknowledgment — student knows we heard them
     await send_telegram_message(
         chat_id,
-        f"*{difficult_subject}* — good to know. I'll make sure we give that extra attention.\n\n"
-        f"Now, what class are you in?\n\n"
+        f"*{difficult_subject}* — excellent choice. Let me show you something real quick..."
+    )
+
+    # Step 2: Call the AI to generate the Magic Trick lesson
+    magic_lesson = await _generate_magic_trick(chat_id, difficult_subject, first, class_level)
+
+    # Step 3: Deliver the Magic Trick lesson
+    await send_telegram_message(chat_id, magic_lesson)
+
+    # Step 4: Transition to class level
+    await send_telegram_message(
+        chat_id,
+        f"That was just a warmup, *{first}*. Now let me learn a bit more about you so I can personalise everything.\n\n"
+        f"What class are you in?\n\n"
         f"{chr(10).join([f'{i+1}. {lvl}' for i, lvl in enumerate(CLASS_LEVELS)])}\n\n"
         f"_(Reply with the number or class name)_"
     )
@@ -225,6 +238,47 @@ async def _step_difficult_subject(chat_id, conversation, message, state):
         conversation['id'], 'telegram', str(chat_id),
         {'conversation_state': {**state, 'difficult_subject': difficult_subject, 'awaiting_response_for': 'class_level'}}
     )
+
+
+async def _generate_magic_trick(chat_id: int, subject: str, student_name: str, class_level: str) -> str:
+    """
+    Calls the AI to generate a short Magic Trick lesson.
+    If the AI call fails or times out, returns a warm fallback message
+    so the student never sees an error.
+    """
+    import asyncio
+    from ai.brain import magic_trick_lesson
+
+    try:
+        # Wait max 12 seconds for the AI — if it takes longer, use fallback
+        lesson = await asyncio.wait_for(
+            magic_trick_lesson(subject, student_name, class_level),
+            timeout=12.0
+        )
+        if lesson and len(lesson.strip()) > 20:
+            return lesson.strip()
+    except asyncio.TimeoutError:
+        print(f"Magic Trick timed out for subject: {subject}")
+    except Exception as e:
+        print(f"Magic Trick error for {subject}: {e[:100]}")
+
+    # Fallback — guaranteed to return something warm
+    fallback_messages = {
+        'physics': f"Ah, Physics. Most people fear it until they realise it's just the rules of how things move and work around us. Think of a danfo bus — when it suddenly brakes and you jerk forward, that's Physics in action. You already understand it more than you think, {student_name}.",
+        'chemistry': f"Chemistry! It sounds intimidating but it's honestly just cooking with extra steps. When you soak garri and it swells, or when your puff-puff rises because of baking soda — that's Chemistry. You've been doing it since you were small, {student_name}.",
+        'biology': f"Biology — the study of life itself. You live inside a Biology classroom every day. Your own body breathing, digesting, fighting off mosquitoes — that's Biology. You already know more than you give yourself credit for, {student_name}.",
+        'mathematics': f"Maths! A lot of students run from it, but at its heart, Maths is just patterns. When a suya seller calculates your change, or you split money with friends — you're doing Maths. It's not a foreign language, {student_name}, it's just a skill you haven't fully trusted yourself with yet.",
+        'economics': f"Economics — you're already living it. Every time you go to the market and see prices change, or hear about the naira on the news, you're watching Economics happen. The trick is just learning the names for things you already notice, {student_name}.",
+        'government': f"Government! It's really just the story of how people organise power. You see it during elections, with INEC, in local government debates. Once you connect it to things happening around you, it stops feeling abstract, {student_name}.",
+        'english': f"English! Here's a secret — you don't need to sound like a textbook to be good at English. Chinua Achebe wrote some of the world's greatest novels in simple, clear English. Focus on clarity, not big words. You've got this, {student_name}.",
+    }
+
+    subject_lower = subject.lower().strip()
+    for key, msg in fallback_messages.items():
+        if key in subject_lower:
+            return msg
+
+    return f"Ah, {subject}. I see you, {student_name}. A lot of students find {subject} tricky — not because it's impossible, but because most teachers rush through it. We'll take it step by step, at your pace."
 
 
 async def _step_class_level(chat_id, conversation, message, state):
