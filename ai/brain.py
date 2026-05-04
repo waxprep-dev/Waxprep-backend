@@ -177,6 +177,49 @@ async def _call_groq(messages: list, model: str, max_tokens: int = 1200) -> str 
     return None
 
 
+async def magic_trick_lesson(subject: str, student_name: str, class_level: str) -> str:
+    """
+    Generates a short, confidence-building lesson for a student who just
+    named their most difficult subject during onboarding.
+    Uses the fast Groq model for speed (this is a first impression).
+    Returns the lesson text, or a warm fallback if the AI call fails.
+    """
+    from ai.prompts import get_magic_trick_prompt
+
+    system_prompt = get_magic_trick_prompt(subject, student_name, class_level)
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"I find {subject} difficult. Can you help me understand it?"}
+    ]
+
+    # Use the fast model — speed matters more than depth here
+    try:
+        result = await _call_groq(messages, model=settings.GROQ_FAST_MODEL, max_tokens=500)
+        if result and len(result.strip()) > 20:
+            return result.strip()
+    except Exception as e:
+        print(f"Magic Trick Groq error: {e[:100]}")
+
+    # Fallback if AI fails — student still gets something warm
+    fallback_messages = {
+        'physics': f"Ah, Physics. Most people fear it until they realise it's just the rules of how things move and work around us. Think of a danfo bus — when it suddenly brakes and you jerk forward, that's Physics in action. You already understand it more than you think, {student_name}.",
+        'chemistry': f"Chemistry! It sounds intimidating but it's honestly just cooking with extra steps. When you soak garri and it swells, or when your puff-puff rises because of baking soda — that's Chemistry. You've been doing it since you were small, {student_name}.",
+        'biology': f"Biology — the study of life itself. You live inside a Biology classroom every day. Your own body breathing, digesting, fighting off mosquitoes — that's Biology. You already know more than you give yourself credit for, {student_name}.",
+        'mathematics': f"Maths! A lot of students run from it, but at its heart, Maths is just patterns. When a suya seller calculates your change, or you split money with friends — you're doing Maths. It's not a foreign language, {student_name}, it's just a skill you haven't fully trusted yourself with yet.",
+        'economics': f"Economics — you're already living it. Every time you go to the market and see prices change, or hear about the naira on the news, you're watching Economics happen. The trick is just learning the names for things you already notice, {student_name}.",
+        'government': f"Government! It's really just the story of how people organise power. You see it during elections, with INEC, in local government debates. Once you connect it to things happening around you, it stops feeling abstract, {student_name}.",
+        'english': f"English! Here's a secret — you don't need to sound like a textbook to be good at English. Chinua Achebe wrote some of the world's greatest novels in simple, clear English. Focus on clarity, not big words. You've got this, {student_name}.",
+    }
+
+    subject_lower = subject.lower().strip()
+    for key, msg in fallback_messages.items():
+        if key in subject_lower:
+            return msg
+
+    return f"Ah, {subject}. I see you, {student_name}. A lot of students find {subject} tricky — not because it's impossible, but because most teachers rush through it. We'll take it step by step, at your pace. That was just a warmup. Let me learn a bit more about you so I can personalise everything."
+
+
 async def _call_gemini(system_prompt: str, message: str,
                         conversation_history: list) -> str | None:
     try:
